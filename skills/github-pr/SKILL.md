@@ -90,6 +90,13 @@ same-named local branch or push directly to an unverified fork. That reference
 sets `WORK_BRANCH`, `PR_HEAD_BRANCH`, and `MAINTAINER_CHECKOUT_VERIFIED` for the
 shared push workflow.
 
+Read [prepare, validate, and
+push](../../lib/github/commit-and-push.md) now and run its target-selection
+section before any repository-local commit operation that could amend, squash,
+or rebase published history. Preserve `EXPECTED_REMOTE_OID` and set
+`HISTORY_REWRITTEN=false`; change it to `true` if later commit work rewrites
+the PR history, but never replace the captured remote OID.
+
 ## Prepare the branch and commit intentionally
 
 For the update route, do not enter this section until `guard-branch` has
@@ -108,11 +115,20 @@ shape. If it is unavailable, stop and ask the user how this repository commits;
 do not substitute a conventional-commit prefix or a generic checklist.
 
 After committing, require a clean worktree and at least one commit in
-`"$BASE_REF"..HEAD`. State the intended base and push target. Then read and run
-[commit and push](../../lib/github/commit-and-push.md). It refreshes
-`DEFAULT_BRANCH`, rebases on `BASE_REF`, selects the role-safe remote and head,
+`"$BASE_REF"..HEAD`. State the intended base and push target. Run the shared
+reference's `prepare` phase now. It refreshes `DEFAULT_BRANCH`, performs the
+final rebase, and checkpoints the exact prepared head, base tip, remote head,
+and preserved rewrite state.
+
+Run the repository-defined focused and required broader validation against
+exactly `PREPARED_HEAD_OID`. Validation must not commit, amend, rebase, switch
+branches, or fetch into the prepared base ref. If it changes `HEAD`, prepare
+and validate again.
+
+Immediately after successful validation, run the shared reference's
+non-mutating `push` phase. It refuses local-head, base-tip, or remote-head drift
 and uses an explicit `--force-with-lease` when history was rewritten. On a
-conflict, resolve and retest under repository policy, or use
+prepare conflict, resolve and restart prepare under repository policy, or use
 `git rebase --abort`; never discard work with a destructive reset.
 
 ## Create or update the pull request

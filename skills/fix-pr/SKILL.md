@@ -46,6 +46,13 @@ distinct local work branch and verified contributor remote. Never infer write
 permission from the user's role, add an unverified remote, or assume
 `github.com`, `origin`, `main`, or a same-named local branch.
 
+Now read [prepare, validate, and
+push](../../lib/github/commit-and-push.md) and run its target-selection section
+before any amend, fixup/autosquash, or rebase. Preserve its exact
+`EXPECTED_REMOTE_OID`, set `HISTORY_REWRITTEN=false`, and state the verified
+push target. Later history edits may change `HISTORY_REWRITTEN` to `true` but
+must never replace the pre-rewrite remote OID.
+
 ## Fetch feedback and check state
 
 Read and run [feedback
@@ -97,7 +104,7 @@ A confirmed “address all actionable items” policy may cover the same
 categories on later iterations. Present newly ambiguous, risky, or
 scope-expanding findings for fresh confirmation.
 
-## Apply and verify selected fixes
+## Apply selected fixes
 
 Read each affected file in context and make the smallest coherent changes.
 Diagnose failures from provider evidence; reproduce locally when useful. Follow
@@ -105,30 +112,47 @@ repository-local instructions and use the repository-local testing skill and
 its defined validation commands. If no validation policy is discoverable, ask
 instead of inventing project commands.
 
-**Verify the selected fixes** before committing: run the repository-defined
-focused checks and required broader validation, inspect the diff, and map each
-approved finding to visible code or test evidence. A pending remote check is
-not evidence that a local change works.
+Run useful focused checks while editing and inspect the diff, but do not treat
+them as final validation: commit folding and the final base rebase may still
+change `HEAD`.
 
-## Fold commits and push the verified head
+## Fold commits and prepare the final head
 
 Use the repository-local `git-commit` skill for staging, review, message format,
 and commit shape. Preserve the contributor's intended PR history:
 
 - When repository policy permits and a finding belongs unambiguously to a
   PR-owned commit in `"$BASE_REF"..HEAD`, create a `fixup` commit for that
-  commit and `autosquash` it before the final validation.
+  commit and `autosquash` it. Set `HISTORY_REWRITTEN=true` without changing
+  the captured `EXPECTED_REMOTE_OID`.
 - Otherwise create one repository-approved repair commit. On later iterations,
   fold fixes into that repair commit or the relevant PR-owned commit rather
   than appending an unbounded chain of generic fixes.
 - Never rewrite a base commit, guess commit syntax, or fold across an ambiguous
   ownership boundary.
 
-After folding, rerun required validation. Then read and run [commit and
-push](../../lib/github/commit-and-push.md). It revalidates the role-specific
-target and uses an explicit `--force-with-lease` when rewritten history must
-update the contributor head. Never push the maintainer work-branch name to a
-replacement branch.
+After all commits and folding, run the shared reference's `prepare` phase. It
+performs the final base fetch/rebase before final validation and records the
+immutable `PREPARED_HEAD_OID`, base tip, remote head, and preserved rewrite
+state. A no-op final rebase does not clear `HISTORY_REWRITTEN`.
+
+## Verify the selected fixes at the prepared head
+
+Run the repository-defined focused checks and required broader validation on
+exactly `PREPARED_HEAD_OID`. Inspect the final diff and map each approved
+finding to visible code or test evidence. A pending remote check is not
+evidence that a local change works.
+
+Final validation must not commit, amend, rebase, switch branches, or fetch into
+the prepared base ref. If any fix changes `HEAD`, discard the checkpoint,
+prepare again, and validate the new OID.
+
+## Push the validated checkpoint
+
+Run the shared reference's non-mutating `push` phase. It refuses local `HEAD`,
+base-tip, or contributor-head drift after validation, then uses a normal push
+or an explicit `--force-with-lease` according to the checkpointed rewrite
+state. Never push the maintainer work-branch name to a replacement branch.
 
 Re-read the PR head after the push and require its OID to equal local `HEAD`
 before responding to reviewers.
@@ -181,5 +205,5 @@ states, and any honest blocker.
 | Pending Actions job | Wait for run completion before whole-run logs |
 | External failed check | Use provider details URL, not `gh run view` |
 | New or ambiguous finding | Present it and obtain confirmation |
-| Rewritten PR history | Push only through shared explicit lease protection |
+| Rewritten PR history | Preserve the old OID; prepare, validate, then lease-push |
 | Repeated unchanged failure | Stop on the same fingerprint or iteration cap |

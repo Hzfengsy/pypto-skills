@@ -66,8 +66,10 @@ REFERENCE_INPUTS = {
             "CURRENT_BRANCH",
             "DEFAULT_BRANCH",
             "HEAD_REPO",
+            "HISTORY_REWRITTEN",
             "LOCAL_REPO",
             "MAINTAINER_CHECKOUT_VERIFIED",
+            "PREPARE_PUSH_HELPER",
             "PR_HEAD_BRANCH",
             "PUSH_REMOTE",
             "REPO_ROOT",
@@ -463,7 +465,7 @@ class PortabilityTests(unittest.TestCase):
         text = skill.read_text(encoding="utf-8")
         findings = text.find("## Classify and present findings")
         confirmation = text.find("## Explicit confirmation gate")
-        fixes = text.find("## Apply and verify selected fixes")
+        fixes = text.find("## Apply selected fixes")
         self.assertGreaterEqual(findings, 0)
         self.assertGreater(confirmation, findings)
         self.assertGreater(fixes, confirmation)
