@@ -6,14 +6,16 @@ GitHub mechanics together so they can be validated as one bundle.
 
 ## First batch
 
-The first migration batch covers:
+The first validated migration batch includes:
 
-- `clean-branches`
-- `github-pr`
-- `fix-pr`
+- `clean-branches`: identify and safely remove merged local and fork branches.
+- `github-pr`: prepare, publish, create, or update pull requests across forks.
+- `fix-pr`: resolve review feedback and failing checks through a bounded,
+  verified repair loop.
 
-These skills are still being migrated. Each skill becomes ready only after its
-own portability and forward-validation task passes.
+The skills, shared references, helper scripts, metadata, and tests are
+validated together. Consumers must therefore copy or sync the whole bundle
+until a dedicated installer is designed.
 
 ## Layout
 
@@ -22,6 +24,5 @@ own portability and forward-validation task passes.
   skills.
 - `tests/` validates skill structure, local links, and portability.
 
-Consumer installation and synchronization are not yet defined. Until that
-design is complete, this repository does not prescribe how another repository
-should consume the bundle.
+Consumer installation and synchronization are not yet defined. This repository
+does not prescribe a submodule, vendoring, or synchronization mechanism.
