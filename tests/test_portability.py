@@ -254,7 +254,8 @@ class PortabilityTests(unittest.TestCase):
             return
 
         text = skill.read_text(encoding="utf-8")
-        self.assertIn("gh pr create", text)
+        self.assertNotIn("gh pr create", text)
+        self.assertIn('"$PR_CONTEXT_HELPER" create', text)
         self.assertIn("gh pr edit", text)
         self.assertIn("existing pull request", text.lower())
         self.assertIn("DEFAULT_BRANCH", text)
@@ -284,7 +285,7 @@ class PortabilityTests(unittest.TestCase):
         text = skill.read_text(encoding="utf-8")
         self.assertIn('GH_HOST="$GITHUB_HOST"', text)
         self.assertIn("../../lib/github/scripts/pr-context.sh", text)
-        self.assertIn('--head "$CREATE_HEAD"', text)
+        self.assertIn("HEAD_REPO=$LOCAL_REPO", text)
         self.assertIn("ROLE", text)
         self.assertIn("HEAD_REPO", text)
         self.assertIn("MAINTAINER_CHECKOUT_VERIFIED", text)
@@ -323,6 +324,39 @@ class PortabilityTests(unittest.TestCase):
         self.assertIn('"repos/$PR_REPO/pulls"', helper_text)
         self.assertIn('-f "head=$HEAD_SELECTOR"', helper_text)
         self.assertIn("--paginate --slurp --jq 'add'", helper_text)
+
+    def test_pull_request_creation_uses_host_pinned_rest_post(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        helper = ROOT / "lib/github/scripts/pr-context.sh"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        self.assertTrue(helper.is_file(), f"missing required helper: {helper}")
+        if not skill.is_file() or not helper.is_file():
+            return
+
+        skill_text = skill.read_text(encoding="utf-8")
+        helper_text = helper.read_text(encoding="utf-8")
+        self.assertNotIn("gh pr create", skill_text)
+        self.assertIn('"$PR_CONTEXT_HELPER" create', skill_text)
+        for text in (skill_text, helper_text):
+            self.assertIn('gh api --hostname "$GITHUB_HOST" --method POST', text)
+            self.assertIn('"repos/$PR_REPO/pulls"', text)
+            self.assertIn('"head_repo=$HEAD_REPO_NAME"', text)
+            self.assertIn(".html_url", text)
+
+    def test_author_guard_checks_branch_and_repository_before_commit(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        guard = text.find('"$PR_CONTEXT_HELPER" guard-branch')
+        commit = text.find("repository-local `git-commit` skill")
+        self.assertGreaterEqual(guard, 0)
+        self.assertGreater(commit, guard)
+        guard_block = text[guard:commit]
+        self.assertIn('"$CURRENT_BRANCH" "$PR_HEAD_BRANCH"', guard_block)
+        self.assertIn('"$LOCAL_REPO" "$HEAD_REPO"', guard_block)
 
     def test_known_pr_number_is_validated_before_positional_gh_use(self) -> None:
         skill = ROOT / "skills/github-pr/SKILL.md"

@@ -6,8 +6,8 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   pr-context.sh lookup HOST PR_REPO HEAD_SELECTOR [--allow-none]
-  pr-context.sh guard-branch ROLE CURRENT_BRANCH PR_HEAD_BRANCH
-  pr-context.sh create-head LOCAL_REPO PR_REPO CURRENT_BRANCH IS_FORK
+  pr-context.sh guard-branch ROLE CURRENT_BRANCH PR_HEAD_BRANCH LOCAL_REPO HEAD_REPO
+  pr-context.sh create HOST PR_REPO HEAD_REPO BRANCH BASE TITLE BODY
   pr-context.sh validate-number PR_NUMBER
 EOF
   exit 2
@@ -100,17 +100,30 @@ lookup() {
 }
 
 guard_branch() {
-  [ "$#" -eq 3 ] || usage
+  [ "$#" -eq 5 ] || usage
   ROLE=$1
   CURRENT_BRANCH=$2
   PR_HEAD_BRANCH=$3
+  LOCAL_REPO=$4
+  HEAD_REPO=$5
   [ -n "$CURRENT_BRANCH" ] || fail "current branch is empty"
   [ -n "$PR_HEAD_BRANCH" ] || fail "pull-request head branch is empty"
+  validate_repo_identity "$LOCAL_REPO" ||
+    fail "LOCAL_REPO must be an owner/name identity"
+  validate_repo_identity "$HEAD_REPO" ||
+    fail "HEAD_REPO must be an owner/name identity"
 
   case "$ROLE" in
     owner|fork)
       if [ "$PR_HEAD_BRANCH" != "$CURRENT_BRANCH" ]; then
         fail "$ROLE workflow is on $CURRENT_BRANCH but PR head is $PR_HEAD_BRANCH"
+      fi
+      NORMALIZED_LOCAL_REPO=$(printf '%s' "$LOCAL_REPO" |
+        tr '[:upper:]' '[:lower:]')
+      NORMALIZED_HEAD_REPO=$(printf '%s' "$HEAD_REPO" |
+        tr '[:upper:]' '[:lower:]')
+      if [ "$NORMALIZED_HEAD_REPO" != "$NORMALIZED_LOCAL_REPO" ]; then
+        fail "$ROLE workflow uses $LOCAL_REPO but PR head repository is $HEAD_REPO"
       fi
       ;;
     maintainer)
@@ -121,40 +134,73 @@ guard_branch() {
   esac
 }
 
-create_head() {
-  [ "$#" -eq 4 ] || usage
-  LOCAL_REPO=$1
+create_pull_request() {
+  [ "$#" -eq 7 ] || usage
+  GITHUB_HOST=$1
   PR_REPO=$2
-  CURRENT_BRANCH=$3
-  IS_FORK=$4
-  validate_repo_identity "$LOCAL_REPO" ||
-    fail "LOCAL_REPO must be an owner/name identity"
+  HEAD_REPO=$3
+  CURRENT_BRANCH=$4
+  BASE_BRANCH=$5
+  PR_TITLE=$6
+  PR_BODY=$7
+
+  case "$GITHUB_HOST" in
+    ""|*/*|*" "*) fail "invalid GitHub host: $GITHUB_HOST" ;;
+  esac
   validate_repo_identity "$PR_REPO" ||
     fail "PR_REPO must be an owner/name identity"
+  validate_repo_identity "$HEAD_REPO" ||
+    fail "HEAD_REPO must be an owner/name identity"
   [ -n "$CURRENT_BRANCH" ] || fail "current branch is empty"
+  [ -n "$BASE_BRANCH" ] || fail "base branch is empty"
+  [ -n "$PR_TITLE" ] || fail "pull-request title is empty"
+  [ -n "$PR_BODY" ] || fail "pull-request body is empty"
 
-  case "$IS_FORK" in
-    true)
-      [ "$LOCAL_REPO" != "$PR_REPO" ] ||
-        fail "fork repository must differ from pull-request repository"
-      printf '%s:%s\n' "${LOCAL_REPO%%/*}" "$CURRENT_BRANCH"
-      ;;
-    false)
-      [ "$LOCAL_REPO" = "$PR_REPO" ] ||
-        fail "non-fork repository must equal pull-request repository"
-      printf '%s\n' "$CURRENT_BRANCH"
-      ;;
-    *)
-      fail "IS_FORK must be true or false"
-      ;;
-  esac
+  NORMALIZED_PR_REPO=$(printf '%s' "$PR_REPO" |
+    tr '[:upper:]' '[:lower:]')
+  NORMALIZED_HEAD_REPO=$(printf '%s' "$HEAD_REPO" |
+    tr '[:upper:]' '[:lower:]')
+  HEAD_REPO_ARGUMENTS=()
+  if [ "$NORMALIZED_HEAD_REPO" = "$NORMALIZED_PR_REPO" ]; then
+    HEAD_SELECTOR=$CURRENT_BRANCH
+  else
+    HEAD_REPO_OWNER=${HEAD_REPO%%/*}
+    HEAD_SELECTOR="$HEAD_REPO_OWNER:$CURRENT_BRANCH"
+    PR_REPO_OWNER=$(printf '%s' "${PR_REPO%%/*}" |
+      tr '[:upper:]' '[:lower:]')
+    NORMALIZED_HEAD_REPO_OWNER=$(printf '%s' "$HEAD_REPO_OWNER" |
+      tr '[:upper:]' '[:lower:]')
+    if [ "$NORMALIZED_HEAD_REPO_OWNER" = "$PR_REPO_OWNER" ]; then
+      HEAD_REPO_NAME=${HEAD_REPO#*/}
+      HEAD_REPO_ARGUMENTS=(-f "head_repo=$HEAD_REPO_NAME")
+    fi
+  fi
+
+  PR_RESPONSE=$(gh api --hostname "$GITHUB_HOST" --method POST \
+    "repos/$PR_REPO/pulls" \
+    -f "title=$PR_TITLE" \
+    -f "body=$PR_BODY" \
+    -f "head=$HEAD_SELECTOR" \
+    -f "base=$BASE_BRANCH" \
+    "${HEAD_REPO_ARGUMENTS[@]}") || {
+    fail "pull-request creation failed for $PR_REPO head $HEAD_SELECTOR"
+  }
+
+  PR_URL=$(printf '%s' "$PR_RESPONSE" | jq -er '
+    if type == "object" and
+       (.html_url | type == "string" and length > 0)
+    then .html_url
+    else error("invalid html_url")
+    end
+  ' 2>/dev/null) ||
+    fail "malformed pull-request creation response for $PR_REPO"
+  printf '%s\n' "$PR_URL"
 }
 
 validate_number() {
   [ "$#" -eq 1 ] || usage
   case "$1" in
-    ""|*[!0-9]*) fail "PR_NUMBER must be a positive integer" ;;
-    0) fail "PR_NUMBER must be a positive integer" ;;
+    ""|0*|*[!0-9]*) fail "PR_NUMBER must be a canonical positive integer" ;;
     *) printf '%s\n' "$1" ;;
   esac
 }
@@ -165,7 +211,7 @@ shift
 case "$COMMAND" in
   lookup) lookup "$@" ;;
   guard-branch) guard_branch "$@" ;;
-  create-head) create_head "$@" ;;
+  create) create_pull_request "$@" ;;
   validate-number) validate_number "$@" ;;
   *) usage ;;
 esac

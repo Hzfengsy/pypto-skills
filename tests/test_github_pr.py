@@ -227,12 +227,15 @@ raise SystemExit(int(os.environ.get("FAKE_GH_EXIT", "0")))
                     [
                         "bash",
                         "-c",
-                        '"$1" guard-branch "$2" "$3" "$4" || exit 23; touch "$5"',
+                        '"$1" guard-branch "$2" "$3" "$4" "$5" "$6" || '
+                        'exit 23; touch "$7"',
                         "_",
                         str(HELPER),
                         role,
                         "local-work",
                         "pr-head",
+                        "acme/widget",
+                        "acme/widget",
                         str(commit_marker),
                     ],
                     cwd=ROOT,
@@ -241,6 +244,37 @@ raise SystemExit(int(os.environ.get("FAKE_GH_EXIT", "0")))
                     text=True,
                 )
                 self.assertEqual(23, result.returncode)
+                self.assertIn("PR head is pr-head", result.stderr)
+                self.assertFalse(commit_marker.exists())
+
+    def test_owner_and_fork_repository_mismatch_stop_before_commit(self) -> None:
+        if not HELPER.is_file():
+            self.fail(f"missing production helper: {HELPER}")
+        for role in ("owner", "fork"):
+            with self.subTest(role=role):
+                commit_marker = self.temp_path / f"{role}-repo-commit-ran"
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        '"$1" guard-branch "$2" "$3" "$4" "$5" "$6" || '
+                        'exit 23; touch "$7"',
+                        "_",
+                        str(HELPER),
+                        role,
+                        "topic",
+                        "topic",
+                        "acme/local-widget",
+                        "acme/other-widget",
+                        str(commit_marker),
+                    ],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(23, result.returncode)
+                self.assertIn("head repository", result.stderr)
                 self.assertFalse(commit_marker.exists())
 
     def test_maintainer_mismatch_remains_available_for_safe_checkout(self) -> None:
@@ -249,43 +283,147 @@ raise SystemExit(int(os.environ.get("FAKE_GH_EXIT", "0")))
             "maintainer",
             "local-work",
             "contributor-head",
+            "base/widget",
+            "contributor/widget",
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_create_head_supports_organization_owned_forks(self) -> None:
+    def test_create_org_fork_uses_host_pinned_post_with_head_repo(self) -> None:
+        response = json.dumps(
+            {"html_url": "https://ghe.example.com/acme/widget/pull/42"}
+        )
         result = self.run_helper(
-            "create-head",
-            "acme-contributors/widget",
+            "create",
+            "ghe.example.com",
+            "acme/widget",
+            "acme/widget-fork",
+            "topic",
+            "trunk",
+            "Feature title",
+            "Summary line\nSecond line",
+            response=response,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            "https://ghe.example.com/acme/widget/pull/42\n",
+            result.stdout,
+        )
+        arguments = json.loads(self.gh_log.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [
+                "api",
+                "--hostname",
+                "ghe.example.com",
+                "--method",
+                "POST",
+                "repos/acme/widget/pulls",
+                "-f",
+                "title=Feature title",
+                "-f",
+                "body=Summary line\nSecond line",
+                "-f",
+                "head=acme:topic",
+                "-f",
+                "base=trunk",
+                "-f",
+                "head_repo=widget-fork",
+            ],
+            arguments,
+        )
+        self.assertNotEqual(["pr", "create"], arguments[:2])
+
+    def test_create_owner_pr_omits_head_repo(self) -> None:
+        response = json.dumps({"html_url": "https://github.com/acme/widget/pull/7"})
+        result = self.run_helper(
+            "create",
+            "github.com",
+            "acme/widget",
             "acme/widget",
             "topic",
-            "true",
+            "main",
+            "Owner title",
+            "Owner body",
+            response=response,
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("acme-contributors:topic\n", result.stdout)
+        self.assertEqual("https://github.com/acme/widget/pull/7\n", result.stdout)
+        arguments = json.loads(self.gh_log.read_text(encoding="utf-8"))
+        self.assertIn("head=topic", arguments)
+        self.assertNotIn("-f=head_repo", arguments)
+        self.assertFalse(any(item.startswith("head_repo=") for item in arguments))
 
-    def test_create_head_for_owner_repository_has_no_prefix(self) -> None:
+    def test_create_cross_owner_fork_omits_head_repo(self) -> None:
+        response = json.dumps({"html_url": "https://github.com/acme/widget/pull/8"})
         result = self.run_helper(
-            "create-head",
+            "create",
+            "github.com",
             "acme/widget",
-            "acme/widget",
+            "contributor/widget",
             "topic",
-            "false",
+            "main",
+            "Fork title",
+            "Fork body",
+            response=response,
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("topic\n", result.stdout)
+        arguments = json.loads(self.gh_log.read_text(encoding="utf-8"))
+        self.assertIn("head=contributor:topic", arguments)
+        self.assertFalse(any(item.startswith("head_repo=") for item in arguments))
+
+    def test_create_fails_closed_on_malformed_responses(self) -> None:
+        malformed_responses = (
+            "not-json",
+            "{}",
+            json.dumps({"html_url": ""}),
+            json.dumps({"html_url": 42}),
+        )
+        for response in malformed_responses:
+            with self.subTest(response=response):
+                result = self.run_helper(
+                    "create",
+                    "ghe.example.com",
+                    "acme/widget",
+                    "acme/widget-fork",
+                    "topic",
+                    "trunk",
+                    "Feature title",
+                    "Feature body",
+                    response=response,
+                )
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("malformed pull-request creation response", result.stderr)
+
+    def test_create_fails_closed_when_gh_fails(self) -> None:
+        result = self.run_helper(
+            "create",
+            "ghe.example.com",
+            "acme/widget",
+            "acme/widget-fork",
+            "topic",
+            "trunk",
+            "Feature title",
+            "Feature body",
+            gh_exit=17,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("pull-request creation failed", result.stderr)
 
     def test_pr_number_must_be_strictly_numeric(self) -> None:
-        for value in ("", "12x", "-1", "1.5", "1 2"):
+        for value in ("", "0", "00", "000", "01", "0012", "12x", "-1", "1.5", "1 2"):
             with self.subTest(value=value):
                 result = self.run_helper("validate-number", value)
                 self.assertNotEqual(0, result.returncode)
 
-        result = self.run_helper("validate-number", "123")
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("123\n", result.stdout)
+        for value in ("1", "9", "10", "123"):
+            with self.subTest(value=value):
+                result = self.run_helper("validate-number", value)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(f"{value}\n", result.stdout)
 
 
 if __name__ == "__main__":

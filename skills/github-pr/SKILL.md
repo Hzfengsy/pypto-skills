@@ -74,12 +74,14 @@ repository-local commit workflow:
 ```bash
 if [ "$PR_ROUTE" = "update" ]; then
   "$PR_CONTEXT_HELPER" guard-branch \
-    "$ROLE" "$CURRENT_BRANCH" "$PR_HEAD_BRANCH" || exit 1
+    "$ROLE" "$CURRENT_BRANCH" "$PR_HEAD_BRANCH" \
+    "$LOCAL_REPO" "$HEAD_REPO" || exit 1
 fi
 ```
 
-An owner or fork mismatch stops here, so dirty changes cannot be committed to
-the wrong branch.
+For an owner or fork, either a branch mismatch or a head/local repository
+identity mismatch stops here, so dirty changes cannot be committed to the
+wrong head.
 
 When `ROLE=maintainer` and the PR head is not the current local branch, require
 a clean worktree, then read and run [cross-fork
@@ -89,6 +91,10 @@ sets `WORK_BRANCH`, `PR_HEAD_BRANCH`, and `MAINTAINER_CHECKOUT_VERIFIED` for the
 shared push workflow.
 
 ## Prepare the branch and commit intentionally
+
+For the update route, do not enter this section until `guard-branch` has
+succeeded. There is no shared dirty-worktree or commit step before that
+route-specific branch-and-repository identity gate.
 
 Inspect `git status --porcelain` and `git rev-list --count "$BASE_REF"..HEAD`.
 For the create route, if `CURRENT_BRANCH` equals `DEFAULT_BRANCH`, or has no
@@ -122,24 +128,28 @@ if [ -z "$PR_TITLE" ] || [ -z "$PR_BODY" ]; then
 fi
 ```
 
-Create a new PR with the fork-qualified head discovered by setup:
+Create through host-pinned REST. GitHub's [official create contract](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request)
+requires `head_repo` to be the head repository name for same-organization
+cross-repository PRs. The helper derives it only from verified `HEAD_REPO`.
+
+```text
+gh api --hostname "$GITHUB_HOST" --method POST \
+  "repos/$PR_REPO/pulls" -f "title=$PR_TITLE" -f "body=$PR_BODY" \
+  -f "head=$HEAD_SELECTOR" -f "base=$BASE_BRANCH"
+# Same-owner cross-repository only:
+-f "head_repo=$HEAD_REPO_NAME"
+```
 
 ```bash
 if [ "$PR_ROUTE" = "create" ]; then
-  CREATE_HEAD=$("$PR_CONTEXT_HELPER" create-head \
-    "$LOCAL_REPO" "$PR_REPO" "$CURRENT_BRANCH" "$IS_FORK") || exit 1
-  if [ "$CREATE_HEAD" != "${PR_HEAD_PREFIX}${CURRENT_BRANCH}" ]; then
-    echo "Error: create head disagrees with discovered fork context" >&2
-    exit 1
-  fi
-  PR_URL=$(GH_HOST="$GITHUB_HOST" gh pr create \
-    --repo "$PR_REPO" \
-    --base "$DEFAULT_BRANCH" \
-    --head "$CREATE_HEAD" \
-    --title "$PR_TITLE" \
-    --body "$PR_BODY") || exit 1
+  HEAD_REPO=$LOCAL_REPO
+  PR_URL=$("$PR_CONTEXT_HELPER" create \
+    "$GITHUB_HOST" "$PR_REPO" "$HEAD_REPO" "$CURRENT_BRANCH" \
+    "$DEFAULT_BRANCH" "$PR_TITLE" "$PR_BODY") || exit 1
 fi
 ```
+
+The helper returns only a validated non-empty `.html_url`; failures stop.
 
 Update the existing PR rather than abandoning it:
 
@@ -174,18 +184,15 @@ GH_HOST="$GITHUB_HOST" gh pr view "${PR_NUMBER:-$PR_URL}" \
 | --- | --- |
 | Dirty worktree | Delegate to the repository-local `git-commit` skill |
 | Default or undiverged branch with work | Apply shared branch naming policy |
-| Existing PR | Verify role/head, push, then edit and report it |
-| No existing PR | Push, then create with the fork-qualified head |
 | Maintainer editing a fork | Verify permission and use the shared fork checkout |
 | Rebase rewrites published history | Use only explicit `--force-with-lease` |
 
 ## Common mistakes
 
-- Assuming `main`, `origin`, a public GitHub host, or the current repository is
-  the PR base.
-- Using `gh pr list --head OWNER:BRANCH`; that syntax is unsupported. Use the
-  shared host-pinned REST lookup.
+- Assuming `main`, `origin`, a public GitHub host, or the current repository is the PR base.
+- Using unsupported `gh pr list --head OWNER:BRANCH` instead of shared REST lookup.
 - Exiting when a PR already exists instead of updating its branch and metadata.
-- Committing before an author/fork PR head is verified against the local branch.
+- Committing before an author/fork PR head branch and repository are both
+  verified against the local checkout.
 - Applying maintainer edits without verified head-repository push permission.
 - Inventing commit prefixes, PR checklists, titles, or body content.

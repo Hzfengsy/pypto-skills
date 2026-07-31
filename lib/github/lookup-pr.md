@@ -10,7 +10,8 @@ zero-match result should select a create route.
 
 ## Look up a known number
 
-Validate a user-supplied number before passing it positionally to `gh`:
+Validate a user-supplied number as a canonical positive decimal (no zero or
+leading-zero forms) before passing it positionally to `gh`:
 
 ```bash
 if [ -n "${PR_NUMBER:-}" ]; then
