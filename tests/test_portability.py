@@ -240,6 +240,37 @@ class PortabilityTests(unittest.TestCase):
         self.assertIn("git push --force-with-lease", text)
         self.assertNotRegex(text, r"git push\s+--force(?!-with-lease)")
 
+    def test_clean_branches_uses_portable_safe_deletion_contract(self) -> None:
+        skill = ROOT / "skills/clean-branches/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("../../lib/github/setup.md", text)
+        self.assertIn("DEFAULT_BRANCH", text)
+        self.assertIn("headRefOid", text)
+        self.assertRegex(
+            text,
+            r'git rev-parse .*\n.*headRefOid',
+        )
+        self.assertIn("Never delete from `$BASE_REMOTE`", text)
+
+        approval = re.search(r"(?im)^## Explicit approval gate$", text)
+        self.assertIsNotNone(approval)
+        if approval is None:
+            return
+
+        destructive_commands = (
+            "git branch -D",
+            'git push "$PUSH_REMOTE" --delete',
+        )
+        for command in destructive_commands:
+            with self.subTest(command=command):
+                command_position = text.find(command)
+                self.assertGreaterEqual(command_position, 0)
+                self.assertLess(approval.start(), command_position)
+
 
 if __name__ == "__main__":
     unittest.main()
