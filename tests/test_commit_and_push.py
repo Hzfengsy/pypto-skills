@@ -11,6 +11,7 @@ from pathlib import Path
 from tests.skill_assertions import ROOT
 
 HELPER = ROOT / "lib/github/scripts/prepare-and-push.sh"
+TRANSACTION_HELPER = ROOT / "lib/github/scripts/push-transaction.sh"
 
 
 class CommitAndPushBehaviorTests(unittest.TestCase):
@@ -168,6 +169,10 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
     def prepare(
         self,
         *,
+        expected_base_host: str | None = None,
+        expected_base_repo: str | None = None,
+        expected_head_host: str | None = None,
+        expected_head_repo: str | None = None,
         current_branch: str = "feature",
         push_branch: str = "feature",
         history_rewritten: bool = False,
@@ -181,6 +186,10 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
         )
         result = self.run_helper(
             "prepare",
+            expected_base_host or self.github_host,
+            expected_base_repo or self.base_repo,
+            expected_head_host or self.github_host,
+            expected_head_repo or self.push_repo,
             "base",
             "main",
             "contributor",
@@ -203,8 +212,10 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
         self,
         prepared: dict[str, object],
         *,
-        expected_host: str | None = None,
-        expected_repo: str | None = None,
+        expected_base_host: str | None = None,
+        expected_base_repo: str | None = None,
+        expected_head_host: str | None = None,
+        expected_head_repo: str | None = None,
         base_remote: str = "base",
         default_branch: str = "main",
         push_remote: str = "contributor",
@@ -220,8 +231,10 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
         )
         return self.run_helper(
             "push",
-            expected_host or self.github_host,
-            expected_repo or self.push_repo,
+            expected_base_host or self.github_host,
+            expected_base_repo or self.base_repo,
+            expected_head_host or self.github_host,
+            expected_head_repo or self.push_repo,
             base_remote,
             default_branch,
             push_remote,
@@ -232,6 +245,24 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
             remote_oid,
             str(prepared["history_rewritten"]).lower(),
             fail_git_command=fail_git_command,
+        )
+
+    def run_transaction_script(self, script: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "_",
+                str(TRANSACTION_HELPER),
+                str(HELPER),
+                self.initial_feature_oid,
+            ],
+            cwd=self.work,
+            env=self.environment,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
     def advance_remote(
@@ -352,6 +383,80 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
             self.remote_oid(self.push_url, "feature"),
         )
 
+    def test_base_retarget_before_prepare_is_refused(self) -> None:
+        self.git(self.work, "push", self.attacker_url, "main:main")
+        self.git(self.work, "remote", "set-url", "base", self.attacker_url)
+
+        result, _ = self.prepare()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("base remote base does not fetch from", result.stderr)
+        self.assertEqual(
+            self.initial_feature_oid,
+            self.remote_oid(self.push_url, "feature"),
+        )
+
+    def test_base_retarget_after_prepare_with_same_oid_is_refused(self) -> None:
+        advanced_base_oid = self.advance_remote(
+            self.base_url,
+            "main",
+            "advanced-base-retarget.txt",
+            "advanced base\n",
+        )
+        self.git(self.work, "fetch", "base", "main")
+        self.git(
+            self.work,
+            "push",
+            self.attacker_url,
+            "refs/remotes/base/main:refs/heads/main",
+        )
+        self.assertEqual(advanced_base_oid, self.remote_oid(self.attacker_url, "main"))
+        result, prepared = self.prepare()
+        self.assertEqual(0, result.returncode, result.stderr)
+        assert prepared is not None
+        self.git(self.work, "remote", "set-url", "base", self.attacker_url)
+
+        pushed = self.push(prepared)
+
+        self.assertNotEqual(0, pushed.returncode)
+        self.assertIn("base remote base does not fetch from", pushed.stderr)
+        self.assertEqual(
+            self.initial_feature_oid,
+            self.remote_oid(self.push_url, "feature"),
+        )
+
+    def test_prepare_rejects_malformed_or_multiple_base_fetch_urls(self) -> None:
+        policies = (
+            (("not-a-github-url",), "does not fetch from"),
+            ((self.base_url, self.base_url), "exactly one fetch URL"),
+        )
+        for urls, error in policies:
+            with self.subTest(urls=urls):
+                self.git(
+                    self.work,
+                    "config",
+                    "--unset-all",
+                    "remote.base.url",
+                    check=False,
+                )
+                for url in urls:
+                    self.git(
+                        self.work,
+                        "config",
+                        "--add",
+                        "remote.base.url",
+                        url,
+                    )
+
+                result, _ = self.prepare()
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(error, result.stderr)
+        self.assertEqual(
+            self.initial_feature_oid,
+            self.remote_oid(self.push_url, "feature"),
+        )
+
     def test_local_head_drift_after_prepare_is_refused(self) -> None:
         result, prepared = self.prepare()
         self.assertEqual(0, result.returncode, result.stderr)
@@ -437,7 +542,7 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
 
         pushed = self.push(
             prepared,
-            expected_repo=self.base_repo,
+            expected_head_repo=self.base_repo,
             push_remote="base",
             push_branch="main",
             prepared_remote_oid=self.initial_base_oid,
@@ -518,6 +623,8 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
         valid_arguments = [
             "push",
             self.github_host,
+            self.base_repo,
+            self.github_host,
             self.push_repo,
             "base",
             "main",
@@ -532,11 +639,13 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
         malformed = (
             (1, "ghe..example.test", "EXPECTED_HOST"),
             (2, "../project", "EXPECTED_REPO"),
-            (3, "-base", "invalid Git remote"),
-            (4, "-main", "not a valid branch"),
-            (8, "deadbeef", "PREPARED_HEAD_OID"),
-            (10, "deadbeef", "PREPARED_REMOTE_OID"),
-            (11, "yes", "HISTORY_REWRITTEN"),
+            (3, "ghe..example.test", "EXPECTED_HOST"),
+            (4, "../project", "EXPECTED_REPO"),
+            (5, "-base", "invalid Git remote"),
+            (6, "-main", "not a valid branch"),
+            (10, "deadbeef", "PREPARED_HEAD_OID"),
+            (12, "deadbeef", "PREPARED_REMOTE_OID"),
+            (13, "yes", "HISTORY_REWRITTEN"),
         )
         for index, value, error in malformed:
             with self.subTest(argument=index, value=value):
@@ -547,6 +656,81 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
                 self.assertIn(error, pushed.stderr)
         self.assertEqual(
             self.initial_feature_oid,
+            self.remote_oid(self.push_url, "feature"),
+        )
+
+    def test_failed_validation_then_fresh_transaction_recaptures_and_pushes(
+        self,
+    ) -> None:
+        result = self.run_transaction_script(
+            r"""
+source "$1" || exit 90
+apply_change() {
+  printf 'retry\n' > retry.txt
+  git add retry.txt
+  git commit -m 'retry transaction'
+}
+no_change() { :; }
+fail_validation() { return 17; }
+pass_validation() { :; }
+if pr_push_transaction "$2" apply_change fail_validation \
+  ghe.example.test base/project ghe.example.test contributor/project \
+  base main contributor feature feature; then
+  exit 91
+fi
+REMOTE_AFTER_FAIL=$(git ls-remote --heads contributor refs/heads/feature |
+  awk 'NR == 1 {print $1}') || exit 1
+[ "$REMOTE_AFTER_FAIL" = "$3" ] || exit 92
+pr_push_transaction "$2" no_change pass_validation \
+  ghe.example.test base/project ghe.example.test contributor/project \
+  base main contributor feature feature
+"""
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("readonly variable", result.stderr)
+        self.assertEqual(
+            self.git_output(self.work, "rev-parse", "HEAD"),
+            self.remote_oid(self.push_url, "feature"),
+        )
+
+    def test_successive_fix_iterations_recapture_updated_remote_lease(
+        self,
+    ) -> None:
+        result = self.run_transaction_script(
+            r"""
+source "$1" || exit 90
+iteration_one() {
+  printf 'one\n' > iteration.txt
+  git add iteration.txt
+  git commit -m 'iteration one'
+}
+iteration_two() {
+  printf 'two\n' >> iteration.txt
+  git add iteration.txt
+  git commit --amend --no-edit
+  HISTORY_REWRITTEN=true
+}
+pass_validation() { :; }
+pr_push_transaction "$2" iteration_one pass_validation \
+  ghe.example.test base/project ghe.example.test contributor/project \
+  base main contributor feature feature || exit 1
+FIRST_PUSHED=$(git rev-parse HEAD) || exit 1
+FIRST_REMOTE=$(git ls-remote --heads contributor refs/heads/feature |
+  awk 'NR == 1 {print $1}') || exit 1
+[ "$FIRST_REMOTE" = "$FIRST_PUSHED" ] || exit 93
+pr_push_transaction "$2" iteration_two pass_validation \
+  ghe.example.test base/project ghe.example.test contributor/project \
+  base main contributor feature feature
+"""
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("readonly variable", result.stderr)
+        self.assertIn("Push mode: normal", result.stdout)
+        self.assertIn("Push mode: leased", result.stdout)
+        self.assertEqual(
+            self.git_output(self.work, "rev-parse", "HEAD"),
             self.remote_oid(self.push_url, "feature"),
         )
 

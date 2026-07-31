@@ -5,13 +5,6 @@ description: Use when an existing GitHub pull request has failing or pending che
 
 # Fix Pull Request
 
-## Overview
-
-Repair the verified pull-request head, not merely the current checkout. Gather
-every feedback surface, obtain explicit scope approval, apply repository-defined
-validation and commit policy, and loop until the PR is clean or honestly
-blocked.
-
 ## Establish repository and PR context
 
 Read repository-local instructions and discover its testing and commit
@@ -46,11 +39,10 @@ distinct local work branch and verified contributor remote. Never infer write
 permission from the user's role, add an unverified remote, or assume
 `github.com`, `origin`, `main`, or a same-named local branch.
 
-Read [prepare, validate, and push](../../lib/github/commit-and-push.md) and run
-its authority-capture section now, before any history edit. Keep the verified
-host/repository/remote/branch and exact `EXPECTED_REMOTE_OID` in the parent
-shell, set `HISTORY_REWRITTEN=false`, and never serialize this authority to a
-file. Later rewrites set the boolean to `true` but never replace the old OID.
+Read [single-use push transaction](../../lib/github/commit-and-push.md) and
+resolve its two trusted helpers from the loaded skill/reference, never the
+consuming repository. Do not capture yet: every confirmed iteration starts a
+fresh transaction immediately before repository commit/fold work.
 
 ## Fetch feedback and check state
 
@@ -115,44 +107,28 @@ Run useful focused checks while editing and inspect the diff, but do not treat
 them as final validation: commit folding and the final base rebase may still
 change `HEAD`.
 
-## Fold commits and prepare the final head
+## Verify the selected fixes in one transaction
 
-Use the repository-local `git-commit` skill for staging, review, message format,
-and commit shape. Preserve the contributor's intended PR history:
+Define the transaction's mutation callback to use the repository-local `git-commit` skill
+for staging, review, message format, and commit shape:
 
 - When repository policy permits and a finding belongs unambiguously to a
   PR-owned commit in `"$BASE_REF"..HEAD`, create a `fixup` commit for that
-  commit and `autosquash` it. Set `HISTORY_REWRITTEN=true` without changing
-  the captured `EXPECTED_REMOTE_OID`.
+  commit and `autosquash` it. Set the transaction-local
+  `HISTORY_REWRITTEN=true`.
 - Otherwise create one repository-approved repair commit. On later iterations,
   fold fixes into that repair commit or the relevant PR-owned commit rather
   than appending an unbounded chain of generic fixes.
 - Never rewrite a base commit, guess commit syntax, or fold across an ambiguous
   ownership boundary.
 
-After commits and folding, run the shared `prepare` phase. It performs the
-final base fetch/rebase and returns structured head/base/remote OIDs plus
-rewrite state. Parse the result immediately into parent-shell variables; do
-not write it to disk. A no-op final rebase does not clear rewrite state.
-
-## Verify the selected fixes at the prepared head
-
-Run the repository-defined focused checks and required broader validation on
-exactly `PREPARED_HEAD_OID`. Inspect the final diff and map each approved
-finding to visible code or test evidence. A pending remote check is not
-evidence that a local change works.
-
-Final validation must not commit, amend, rebase, switch branches, fetch into
-the prepared base ref, or be sourced into the authority-holding shell. If a
-fix changes `HEAD`, prepare again and validate the new OID.
-
-## Push the validated prepared head
-
-Pass the preserved host/repository/remote/branch, prepared OIDs, and rewrite
-boolean explicitly to the shared non-mutating `push` phase. It reads no
-authority from disk, revalidates the remote fetch and sole push URL, refuses
-local/base/contributor-head drift, and uses a normal push or explicit
-`--force-with-lease`. Never redirect a maintainer work-branch name.
+Define its validation callback to run repository-focused and broader checks,
+inspect the final diff, and map findings to evidence. Then invoke the shared
+transaction once. It captures the current contributor head before mutation,
+validates explicit base and head identities, prepares, validates the exact
+OID, and pushes without disk authority, using explicit `--force-with-lease`
+after rewrite. A failed callback or changed state returns without pushing; fix
+locally and invoke a wholly new transaction.
 
 Re-read the PR head after the push and require its OID to equal local `HEAD`
 before responding to reviewers.
@@ -183,12 +159,13 @@ when all required checks are completed successfully, no approved actionable
 feedback remains unhandled, every addressed inline thread is resolved, and no
 new out-of-diff or conversation request remains.
 
-Repeat fetch → classify → confirm when needed → fix → verify → fold → push →
-reply → resolve → final recheck for a maximum of 5 iterations. Record a stable
-fingerprint from the head OID, unhandled node IDs, failed check names and
-conclusions, and normalized error signatures. If the same fingerprint recurs
-without progress, stop early and report the blocker; do not push speculative
-retries.
+Repeat fetch → classify → confirm when needed → fix → fresh transaction →
+reply → resolve → final recheck for a maximum of 5 iterations. Every iteration
+recaptures base/head identity and the newly pushed remote OID; no readonly
+state or lease crosses iterations. Record a fingerprint from head OID,
+unhandled IDs, failed checks, and normalized errors. If the same fingerprint
+repeats without progress, stop early and report the blocker; do not push
+speculative retries.
 
 Read [common GitHub workflow
 issues](../../lib/github/common-issues.md) for authentication, remote, rebase,

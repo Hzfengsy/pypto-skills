@@ -5,11 +5,13 @@ set -u
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  prepare-and-push.sh prepare BASE_REMOTE DEFAULT_BRANCH PUSH_REMOTE \
-    CURRENT_BRANCH PUSH_BRANCH HISTORY_REWRITTEN EXPECTED_REMOTE_OID
-  prepare-and-push.sh push EXPECTED_HOST EXPECTED_REPO BASE_REMOTE \
-    DEFAULT_BRANCH PUSH_REMOTE CURRENT_BRANCH PUSH_BRANCH PREPARED_HEAD_OID \
-    PREPARED_BASE_OID PREPARED_REMOTE_OID HISTORY_REWRITTEN
+  prepare-and-push.sh prepare EXPECTED_BASE_HOST EXPECTED_BASE_REPO \
+    EXPECTED_HEAD_HOST EXPECTED_HEAD_REPO BASE_REMOTE DEFAULT_BRANCH \
+    PUSH_REMOTE CURRENT_BRANCH PUSH_BRANCH HISTORY_REWRITTEN EXPECTED_REMOTE_OID
+  prepare-and-push.sh push EXPECTED_BASE_HOST EXPECTED_BASE_REPO \
+    EXPECTED_HEAD_HOST EXPECTED_HEAD_REPO BASE_REMOTE DEFAULT_BRANCH \
+    PUSH_REMOTE CURRENT_BRANCH PUSH_BRANCH PREPARED_HEAD_OID PREPARED_BASE_OID \
+    PREPARED_REMOTE_OID HISTORY_REWRITTEN
 
 EXPECTED_REMOTE_OID is the verified pre-rewrite remote head, or - for a
 verified unpublished branch. PREPARED_REMOTE_OID uses UNPUBLISHED.
@@ -147,6 +149,30 @@ EOF
   [ "$PUSH_URL_COUNT" -eq 1 ]
 }
 
+validate_base_remote() {
+  REMOTE_NAME=$1
+  EXPECTED_HOST_LOWER=$2
+  EXPECTED_REPO_LOWER=$3
+  EXPECTED_HOST_DISPLAY=$4
+  EXPECTED_REPO_DISPLAY=$5
+  FETCH_URLS=$(git remote get-url --all "$REMOTE_NAME" 2>/dev/null) ||
+    fail "failed to inspect base remote $REMOTE_NAME"
+  FETCH_URL_COUNT=0
+  while IFS= read -r FETCH_URL; do
+    [ -n "$FETCH_URL" ] || continue
+    FETCH_URL_COUNT=$((FETCH_URL_COUNT + 1))
+    remote_url_identity "$FETCH_URL" ||
+      fail "base remote $REMOTE_NAME does not fetch from $EXPECTED_HOST_DISPLAY/$EXPECTED_REPO_DISPLAY"
+    [ "$REMOTE_HOST" = "$EXPECTED_HOST_LOWER" ] &&
+      [ "$REMOTE_REPO" = "$EXPECTED_REPO_LOWER" ] ||
+      fail "base remote $REMOTE_NAME does not fetch from $EXPECTED_HOST_DISPLAY/$EXPECTED_REPO_DISPLAY"
+  done <<EOF
+$FETCH_URLS
+EOF
+  [ "$FETCH_URL_COUNT" -eq 1 ] ||
+    fail "base remote $REMOTE_NAME must have exactly one fetch URL"
+}
+
 remote_head_oid() {
   REMOTE_OUTPUT=$(git ls-remote --heads "$1" "refs/heads/$2") ||
     fail "failed to inspect $1/$2"
@@ -177,15 +203,23 @@ read_status() {
 }
 
 prepare() {
-  [ "$#" -eq 7 ] || usage
-  BASE_REMOTE=$1
-  DEFAULT_BRANCH=$2
-  PUSH_REMOTE=$3
-  CURRENT_BRANCH=$4
-  PUSH_BRANCH=$5
-  HISTORY_REWRITTEN_INPUT=$6
-  EXPECTED_REMOTE_OID=$7
+  [ "$#" -eq 11 ] || usage
+  EXPECTED_BASE_HOST=$1
+  EXPECTED_BASE_REPO=$2
+  EXPECTED_HEAD_HOST=$3
+  EXPECTED_HEAD_REPO=$4
+  BASE_REMOTE=$5
+  DEFAULT_BRANCH=$6
+  PUSH_REMOTE=$7
+  CURRENT_BRANCH=$8
+  PUSH_BRANCH=$9
+  HISTORY_REWRITTEN_INPUT=${10}
+  EXPECTED_REMOTE_OID=${11}
 
+  require_host "$EXPECTED_BASE_HOST"
+  require_repo "$EXPECTED_BASE_REPO"
+  require_host "$EXPECTED_HEAD_HOST"
+  require_repo "$EXPECTED_HEAD_REPO"
   require_boolean "HISTORY_REWRITTEN" "$HISTORY_REWRITTEN_INPUT"
   case "$EXPECTED_REMOTE_OID" in
     -) ;;
@@ -196,6 +230,24 @@ prepare() {
   require_branch "PUSH_BRANCH" "$PUSH_BRANCH"
   require_remote "$BASE_REMOTE"
   require_remote "$PUSH_REMOTE"
+  EXPECTED_BASE_HOST_LOWER=$(printf '%s' "$EXPECTED_BASE_HOST" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_BASE_HOST"
+  EXPECTED_BASE_REPO_LOWER=$(printf '%s' "$EXPECTED_BASE_REPO" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_BASE_REPO"
+  EXPECTED_HEAD_HOST_LOWER=$(printf '%s' "$EXPECTED_HEAD_HOST" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_HEAD_HOST"
+  EXPECTED_HEAD_REPO_LOWER=$(printf '%s' "$EXPECTED_HEAD_REPO" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_HEAD_REPO"
+  validate_base_remote \
+    "$BASE_REMOTE" "$EXPECTED_BASE_HOST_LOWER" "$EXPECTED_BASE_REPO_LOWER" \
+    "$EXPECTED_BASE_HOST" "$EXPECTED_BASE_REPO"
+  remote_targets_repo \
+    "$PUSH_REMOTE" "$EXPECTED_HEAD_HOST_LOWER" "$EXPECTED_HEAD_REPO_LOWER" ||
+    fail "remote $PUSH_REMOTE does not target $EXPECTED_HEAD_HOST/$EXPECTED_HEAD_REPO"
 
   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) ||
     fail "the current directory is not in a Git worktree"
@@ -277,21 +329,25 @@ prepare() {
 }
 
 push_prepared() {
-  [ "$#" -eq 11 ] || usage
-  EXPECTED_HOST=$1
-  EXPECTED_REPO=$2
-  BASE_REMOTE=$3
-  DEFAULT_BRANCH=$4
-  PUSH_REMOTE=$5
-  CURRENT_BRANCH=$6
-  PUSH_BRANCH=$7
-  PREPARED_HEAD_OID=$8
-  PREPARED_BASE_OID=$9
-  PREPARED_REMOTE_VALUE=${10}
-  HISTORY_REWRITTEN=${11}
+  [ "$#" -eq 13 ] || usage
+  EXPECTED_BASE_HOST=$1
+  EXPECTED_BASE_REPO=$2
+  EXPECTED_HEAD_HOST=$3
+  EXPECTED_HEAD_REPO=$4
+  BASE_REMOTE=$5
+  DEFAULT_BRANCH=$6
+  PUSH_REMOTE=$7
+  CURRENT_BRANCH=$8
+  PUSH_BRANCH=$9
+  PREPARED_HEAD_OID=${10}
+  PREPARED_BASE_OID=${11}
+  PREPARED_REMOTE_VALUE=${12}
+  HISTORY_REWRITTEN=${13}
 
-  require_host "$EXPECTED_HOST"
-  require_repo "$EXPECTED_REPO"
+  require_host "$EXPECTED_BASE_HOST"
+  require_repo "$EXPECTED_BASE_REPO"
+  require_host "$EXPECTED_HEAD_HOST"
+  require_repo "$EXPECTED_HEAD_REPO"
   require_remote "$BASE_REMOTE"
   require_remote "$PUSH_REMOTE"
   require_branch "DEFAULT_BRANCH" "$DEFAULT_BRANCH"
@@ -305,18 +361,27 @@ push_prepared() {
   esac
   require_boolean "HISTORY_REWRITTEN" "$HISTORY_REWRITTEN"
 
-  EXPECTED_HOST_LOWER=$(printf '%s' "$EXPECTED_HOST" |
+  EXPECTED_BASE_HOST_LOWER=$(printf '%s' "$EXPECTED_BASE_HOST" |
     tr '[:upper:]' '[:lower:]') ||
-    fail "failed to normalize EXPECTED_HOST"
-  EXPECTED_REPO_LOWER=$(printf '%s' "$EXPECTED_REPO" |
+    fail "failed to normalize EXPECTED_BASE_HOST"
+  EXPECTED_BASE_REPO_LOWER=$(printf '%s' "$EXPECTED_BASE_REPO" |
     tr '[:upper:]' '[:lower:]') ||
-    fail "failed to normalize EXPECTED_REPO"
+    fail "failed to normalize EXPECTED_BASE_REPO"
+  EXPECTED_HEAD_HOST_LOWER=$(printf '%s' "$EXPECTED_HEAD_HOST" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_HEAD_HOST"
+  EXPECTED_HEAD_REPO_LOWER=$(printf '%s' "$EXPECTED_HEAD_REPO" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_HEAD_REPO"
+  validate_base_remote \
+    "$BASE_REMOTE" "$EXPECTED_BASE_HOST_LOWER" "$EXPECTED_BASE_REPO_LOWER" \
+    "$EXPECTED_BASE_HOST" "$EXPECTED_BASE_REPO"
   remote_targets_repo \
-    "$PUSH_REMOTE" "$EXPECTED_HOST_LOWER" "$EXPECTED_REPO_LOWER" ||
-    fail "remote $PUSH_REMOTE does not target $EXPECTED_HOST/$EXPECTED_REPO"
+    "$PUSH_REMOTE" "$EXPECTED_HEAD_HOST_LOWER" "$EXPECTED_HEAD_REPO_LOWER" ||
+    fail "remote $PUSH_REMOTE does not target $EXPECTED_HEAD_HOST/$EXPECTED_HEAD_REPO"
   if [ "$PUSH_BRANCH" = "$DEFAULT_BRANCH" ] &&
-    remote_fetches_repo \
-      "$BASE_REMOTE" "$EXPECTED_HOST_LOWER" "$EXPECTED_REPO_LOWER"; then
+    [ "$EXPECTED_BASE_HOST_LOWER" = "$EXPECTED_HEAD_HOST_LOWER" ] &&
+    [ "$EXPECTED_BASE_REPO_LOWER" = "$EXPECTED_HEAD_REPO_LOWER" ]; then
     fail "refusing to push the protected base branch"
   fi
 
@@ -350,6 +415,13 @@ push_prepared() {
     [ "$ACTUAL_REMOTE_OID" = "$PREPARED_REMOTE_VALUE" ] ||
       fail "remote head changed after prepare"
   fi
+
+  validate_base_remote \
+    "$BASE_REMOTE" "$EXPECTED_BASE_HOST_LOWER" "$EXPECTED_BASE_REPO_LOWER" \
+    "$EXPECTED_BASE_HOST" "$EXPECTED_BASE_REPO"
+  remote_targets_repo \
+    "$PUSH_REMOTE" "$EXPECTED_HEAD_HOST_LOWER" "$EXPECTED_HEAD_REPO_LOWER" ||
+    fail "remote $PUSH_REMOTE does not target $EXPECTED_HEAD_HOST/$EXPECTED_HEAD_REPO"
 
   if [ "$PREPARED_REMOTE_VALUE" = "UNPUBLISHED" ]; then
     git push "$PUSH_REMOTE" "$CURRENT_BRANCH:$PUSH_BRANCH" ||

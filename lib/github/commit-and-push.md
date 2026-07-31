@@ -1,45 +1,33 @@
-# Prepare, Validate, and Push
+# Single-Use Pull-Request Push Transaction
 
-Prepare a repository-approved commit and push only the verified pull-request
-head. Commit shape and validation commands remain repository responsibilities.
-Resolve [`scripts/prepare-and-push.sh`](scripts/prepare-and-push.sh) relative to
-this reference as the absolute `PREPARE_PUSH_HELPER`.
+Push only through one capture → mutate/commit → prepare → validate → push
+transaction. Resolve these trusted files relative to this reference, never the
+consuming repository:
 
-The trust boundary is:
+- [`scripts/prepare-and-push.sh`](scripts/prepare-and-push.sh) as the absolute
+  executable `PREPARE_PUSH_HELPER`;
+- [`scripts/push-transaction.sh`](scripts/push-transaction.sh) as
+  `PUSH_TRANSACTION_HELPER`, then source it.
 
-1. capture the write target in the parent shell before any rewrite;
-2. `prepare` performs the final fetch/rebase and returns JSON;
-3. parse that JSON immediately into parent-shell variables;
-4. validate exactly the prepared `HEAD`;
-5. pass all authority explicitly to non-mutating `push`.
+The transaction function runs in a subshell. Authority becomes readonly only
+inside that invocation and disappears on return. It stores no checkpoint.
 
-Never serialize push authority to a checkpoint or other file that contributor
-code can replace during validation.
+## Select base and head identities
 
-## 1. Capture push authority before history edits
-
-Run this only after the final local branch is checked out. For a create route,
-branch naming and checkout therefore happen first. For an update route, run it
-after the verified PR-head checkout and before amend, fixup/autosquash, or
-rebase.
+Run only after the final local branch is checked out. The base authority is
+always the discovered PR destination; the head authority depends on role:
 
 ```bash
-for REQUIRED_NAME in REPO_ROOT GITHUB_HOST CURRENT_BRANCH DEFAULT_BRANCH \
-  BASE_REMOTE BASE_REF PUSH_REMOTE PR_REPO ROLE; do
-  if [ -z "${!REQUIRED_NAME:-}" ]; then
+for REQUIRED_NAME in REPO_ROOT GITHUB_HOST PR_REPO CURRENT_BRANCH \
+  DEFAULT_BRANCH BASE_REMOTE PUSH_REMOTE ROLE; do
+  [ -n "${!REQUIRED_NAME:-}" ] || {
     echo "Error: required context variable $REQUIRED_NAME is unset" >&2
     exit 1
-  fi
+  }
 done
-cd "$REPO_ROOT" || exit 1
-ACTUAL_BRANCH=$(git branch --show-current) || {
-  echo "Error: failed to inspect the current branch" >&2
-  exit 1
-}
-[ "$ACTUAL_BRANCH" = "$CURRENT_BRANCH" ] || {
-  echo "Error: expected branch $CURRENT_BRANCH, found $ACTUAL_BRANCH" >&2
-  exit 1
-}
+EXPECTED_BASE_HOST="$GITHUB_HOST"
+EXPECTED_BASE_REPO="$PR_REPO"
+EXPECTED_HEAD_HOST="$GITHUB_HOST"
 
 case "$ROLE" in
   owner|fork)
@@ -70,109 +58,65 @@ case "$ROLE" in
     ;;
   *) echo "Error: unsupported repository role: $ROLE" >&2; exit 1 ;;
 esac
+
+remote_targets_repo "$BASE_REMOTE" "$EXPECTED_BASE_REPO" || {
+  echo "Error: base remote identity changed" >&2
+  exit 1
+}
 remote_targets_repo "$PUSH_REMOTE" "$EXPECTED_PUSH_REPO" || {
-  echo "Error: push remote does not safely target $EXPECTED_PUSH_REPO" >&2
+  echo "Error: push remote identity changed" >&2
   exit 1
 }
 
-REMOTE_HEADS=$(git ls-remote --heads "$PUSH_REMOTE" \
-  "refs/heads/$PUSH_BRANCH") || {
-  echo "Error: failed to inspect $PUSH_REMOTE/$PUSH_BRANCH" >&2
-  exit 1
+source "$PUSH_TRANSACTION_HELPER" || exit 1
+
+apply_transaction_changes() {
+  # Apply/stage/commit/fold only through repository-approved policy.
+  # Set HISTORY_REWRITTEN=true here after amend/autosquash/rebase.
+  :
 }
-EXPECTED_REMOTE_OID=""
-REMOTE_MATCH_COUNT=0
-while IFS= read -r REMOTE_LINE; do
-  [ -n "$REMOTE_LINE" ] || continue
-  REMOTE_MATCH_COUNT=$((REMOTE_MATCH_COUNT + 1))
-  EXPECTED_REMOTE_OID=${REMOTE_LINE%%[[:space:]]*}
-done <<EOF
-$REMOTE_HEADS
-EOF
-[ "$REMOTE_MATCH_COUNT" -le 1 ] || {
-  echo "Error: multiple remote heads matched the push branch" >&2
-  exit 1
+validate_transaction_head() {
+  # Run repository-defined focused and broader checks as child processes.
+  :
 }
-[ -n "$EXPECTED_REMOTE_OID" ] || EXPECTED_REMOTE_OID="-"
-HISTORY_REWRITTEN=false
-```
 
-Preserve `EXPECTED_REMOTE_OID`. Set `HISTORY_REWRITTEN=true` after any amend,
-autosquash, rebase, or other published-history rewrite; a later no-op rebase
-must not clear it. State the host, repository, remote, branch, and old OID.
-
-## 2. Prepare and parse the final head
-
-After commit/folding work and focused editing checks, run `prepare`:
-
-```bash
-PREPARE_RESULT=$("$PREPARE_PUSH_HELPER" prepare \
+pr_push_transaction "$PREPARE_PUSH_HELPER" \
+  apply_transaction_changes validate_transaction_head \
+  "$EXPECTED_BASE_HOST" "$EXPECTED_BASE_REPO" \
+  "$EXPECTED_HEAD_HOST" "$EXPECTED_PUSH_REPO" \
   "$BASE_REMOTE" "$DEFAULT_BRANCH" "$PUSH_REMOTE" \
-  "$CURRENT_BRANCH" "$PUSH_BRANCH" \
-  "$HISTORY_REWRITTEN" "$EXPECTED_REMOTE_OID") || exit 1
-PREPARED_FIELDS=$(printf '%s' "$PREPARE_RESULT" | jq -er '
-  if .version == 1
-     and (.prepared_head_oid | type == "string")
-     and (.prepared_base_oid | type == "string")
-     and (.prepared_remote_oid | type == "string")
-     and (.history_rewritten | type == "boolean")
-  then [.prepared_head_oid, .prepared_base_oid, .prepared_remote_oid,
-        (.history_rewritten | tostring)] | @tsv
-  else error("malformed prepare result") end') || exit 1
-IFS=$'\t' read -r PREPARED_HEAD_OID PREPARED_BASE_OID \
-  PREPARED_REMOTE_OID HISTORY_REWRITTEN <<EOF
-$PREPARED_FIELDS
-EOF
-readonly GITHUB_HOST EXPECTED_PUSH_REPO BASE_REMOTE DEFAULT_BRANCH PUSH_REMOTE
-readonly CURRENT_BRANCH PUSH_BRANCH PREPARED_HEAD_OID PREPARED_BASE_OID
-readonly PREPARED_REMOTE_OID HISTORY_REWRITTEN PREPARE_PUSH_HELPER
+  "$CURRENT_BRANCH" "$PUSH_BRANCH" || exit 1
 ```
 
-The JSON is transient transport, not later authority. Do not write it to disk.
-`prepare` verifies the final base/remote tips and preserves earlier rewrite
-state. Resolve a rebase conflict and rerun `prepare`, or abort.
+Replace the callback bodies, not the transaction mechanics. The mutation
+callback runs after the exact remote head is captured and may update the
+dynamically scoped `HISTORY_REWRITTEN`; it must leave a clean committed
+worktree. The validation callback runs after the final base fetch/rebase and
+must not source contributor code, change `HEAD`, dirty the worktree, switch
+branches, or fetch.
 
-## 3. Validate exactly the prepared OID
+## Identity and push guarantees
 
-Run repository-defined focused and broader validation now. Do not source
-contributor scripts into this authority-holding shell. Validation must not
-commit, rebase, switch branches, or fetch into the prepared base ref.
+Both `prepare` and `push` receive explicit expected base host/repository and
+head host/repository arguments. Before fetching/rebasing, `prepare` requires
+the base remote's sole fetch URL to map to the expected base and requires every
+head fetch URL plus the sole push URL to map to the expected head. `push`
+repeats both identity checks, verifies local/base/head OIDs, then repeats the
+URL checks immediately before its only write.
 
-```bash
-VALIDATED_HEAD_OID=$(git rev-parse HEAD) || exit 1
-[ "$VALIDATED_HEAD_OID" = "$PREPARED_HEAD_OID" ] || {
-  echo "Error: validation did not preserve prepared HEAD" >&2
-  exit 1
-}
-VALIDATED_STATUS=$(git status --porcelain) || {
-  echo "Error: failed to inspect the validated worktree" >&2
-  exit 1
-}
-[ -z "$VALIDATED_STATUS" ] || {
-  echo "Error: validation changed the prepared worktree" >&2
-  exit 1
-}
-```
+A non-rewrite uses a normal push. Rewritten published history uses explicit
+`git push --force-with-lease` against the head OID captured by this invocation.
+The helper rejects a same-repository base/default target.
 
-If validation changes code/history, return to `prepare` and validate the new
-OID. If the PR head changed, restart from authority capture.
+## Retry and iteration rule
 
-## 4. Push with explicit parent-shell authority
+The transaction is single-use whether it succeeds or fails. If mutation,
+prepare, or validation fails—or validation changes the prepared state—let the
+subshell return without pushing. Fix the local issue, then call
+`pr_push_transaction` again. The new invocation recaptures base/head state and
+starts with fresh rewrite state; never retry an old prepared result.
 
-```bash
-"$PREPARE_PUSH_HELPER" push \
-  "$GITHUB_HOST" "$EXPECTED_PUSH_REPO" \
-  "$BASE_REMOTE" "$DEFAULT_BRANCH" "$PUSH_REMOTE" \
-  "$CURRENT_BRANCH" "$PUSH_BRANCH" \
-  "$PREPARED_HEAD_OID" "$PREPARED_BASE_OID" \
-  "$PREPARED_REMOTE_OID" "$HISTORY_REWRITTEN" || exit 1
-```
-
-`push` strictly validates every argument, then revalidates that the remote's
-fetch URLs and single push URL still map to
-`$GITHUB_HOST/$EXPECTED_PUSH_REPO`. It refuses a same-repository base/default
-target and any local-head, worktree, base-tip, or remote-head drift. It never
-fetches, rebases, or reads authority from disk. Non-rewrites use a normal push;
-rewritten history uses explicit `git push --force-with-lease` against
-`PREPARED_REMOTE_OID`. Finally it verifies the remote head equals
-`PREPARED_HEAD_OID`.
+After a successful push, any later fix-pr iteration also calls a new
+transaction. It therefore captures the just-pushed head as its new remote OID.
+Do not wrap multiple pushes in one function call or move readonly variables to
+the parent shell.

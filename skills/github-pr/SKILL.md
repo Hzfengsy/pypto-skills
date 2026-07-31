@@ -105,36 +105,33 @@ after its checkout succeeds, set `PR_HEAD_BRANCH="$CURRENT_BRANCH"` and
 
 ## Capture push authority before commit work
 
-Read [prepare, validate, and push](../../lib/github/commit-and-push.md) and resolve its helper from that reference, never `REPO_ROOT`/CWD.
-For `create`, this is after branch naming/checkout; for `update`, it is after
-the verified head checkout above. Run its authority-capture section before any
-commit operation that could rewrite history. Keep the verified
-host/repository/remote/branch and `EXPECTED_REMOTE_OID` in the parent shell,
-never a file. Set `HISTORY_REWRITTEN=false`, changing only the boolean to
-`true` after a later rewrite.
+Read [prepare, validate, and push](../../lib/github/commit-and-push.md) and
+resolve both trusted helpers from that reference, never `REPO_ROOT`/CWD. For
+`create`, this follows branch checkout; for `update`, it follows the verified
+head checkout. Enter its single-use transaction immediately before commit
+work. Pass `GITHUB_HOST`/`PR_REPO` as the expected base identity and the
+verified head host/repository, remote, and branch as the head authority.
 
 ## Commit intentionally
 
-If uncommitted changes remain, use the repository-local `git-commit` skill.
-Let that skill apply the repository's review, tests, message syntax, and commit
-shape. If it is unavailable, stop and ask the user how this repository commits;
-do not substitute a conventional-commit prefix or a generic checklist.
+The transaction's mutation callback uses the repository-local `git-commit` skill
+for uncommitted changes. Let it apply repository review, tests, message
+syntax, and commit shape. If unavailable, stop and ask how this repository
+commits; do not invent a generic workflow. Mark its transaction-local
+`HISTORY_REWRITTEN=true` only after amend, rebase, or another rewrite.
 
-After committing, require a clean worktree and at least one commit in
-`"$BASE_REF"..HEAD`. Run shared `prepare`; it refreshes/rebases on the base and
-returns structured head/base/remote OIDs and rewrite state. Parse them
-immediately into parent-shell variables and never serialize them to disk.
+Its validation callback requires a clean worktree, a nonempty
+`"$BASE_REF"..HEAD` range, and all repository-defined focused and broader
+checks against exactly `PREPARED_HEAD_OID`. It must not mutate Git state.
+Shared `prepare` refreshes/rebases, and shared `push` revalidates base and head
+URLs, refuses OID drift, and uses explicit `--force-with-lease` after rewrite.
 
-Run the repository-defined focused and required broader validation against
-exactly `PREPARED_HEAD_OID`. Validation must not commit, amend, rebase, switch
-branches, fetch into the prepared base ref, or be sourced into this
-authority-holding shell. If it changes `HEAD`, prepare and validate again.
-
-Pass all preserved authority and prepared values explicitly to shared
-non-mutating `push`. It reloads nothing from disk, revalidates the remote URLs,
-refuses head/base/remote drift, and uses explicit `--force-with-lease` after a
-rewrite. Resolve a prepare conflict and rerun under repository policy, or use
-`git rebase --abort`; never discard work with a destructive reset.
+One function/subshell invocation is one transaction: it captures the remote
+head before mutation and keeps readonly authority scoped inside that
+invocation. A failed callback, changed `HEAD`, conflict, or later fix iteration
+must start a fresh transaction and recapture all identities, OIDs, and rewrite
+state. Never reuse a lease or prepared value. Resolve conflicts under
+repository policy or use `git rebase --abort`; never destructively reset work.
 
 ## Create or update the pull request
 
