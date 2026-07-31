@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Source this trusted library, then call pr_push_transaction with two trusted
-# callback function names. Each call runs in a subshell so authority is
-# single-use and readonly state cannot leak into a retry or later iteration.
+# Source this trusted library, then call pr_push_transaction with one mutation
+# callback and one absolute trusted validation runner. Each call runs in a
+# subshell so authority is single-use and readonly state cannot leak.
 
 pr_transaction_fail() {
   echo "Error: $*" >&2
@@ -38,11 +38,11 @@ EOF
 pr_push_transaction() (
   [ "$#" -eq 12 ] ||
     pr_transaction_fail \
-      "transaction requires helper, callbacks, identities, remotes, and branches" ||
+      "transaction requires helper, mutation, runner, identities, remotes, and branches" ||
     return 1
   local prepare_push_helper=$1
   local mutation_callback=$2
-  local validation_callback=$3
+  local validation_runner=$3
   local expected_base_host=$4
   local expected_base_repo=$5
   local expected_head_host=$6
@@ -55,6 +55,10 @@ pr_push_transaction() (
   local expected_remote_oid prepare_result prepared_fields
   local prepared_head_oid prepared_base_oid prepared_remote_oid
   local validated_head_oid validated_status
+  local validation_command=${VALIDATION_COMMAND:-}
+  local GIT_CONFIG_COUNT=1
+  local GIT_CONFIG_KEY_0=core.hooksPath
+  local GIT_CONFIG_VALUE_0=/dev/null
   local HISTORY_REWRITTEN=false
 
   case "$prepare_push_helper" in
@@ -64,19 +68,29 @@ pr_push_transaction() (
   [ -x "$prepare_push_helper" ] ||
     pr_transaction_fail "prepare/push helper is not executable" ||
     return 1
-  case "$mutation_callback:$validation_callback" in
-    *[!A-Za-z0-9_:]*|:*|*:) pr_transaction_fail "invalid callback name"; return 1 ;;
+  case "$validation_runner" in
+    /*) ;;
+    *) pr_transaction_fail "validation runner path must be absolute"; return 1 ;;
+  esac
+  [ -x "$validation_runner" ] ||
+    pr_transaction_fail "validation runner is not executable" ||
+    return 1
+  [ -n "$validation_command" ] ||
+    pr_transaction_fail "VALIDATION_COMMAND must not be empty" ||
+    return 1
+  case "$mutation_callback" in
+    *[!A-Za-z0-9_:]*|"") pr_transaction_fail "invalid callback name"; return 1 ;;
   esac
   declare -F "$mutation_callback" >/dev/null ||
     pr_transaction_fail "mutation callback is unavailable" ||
     return 1
-  declare -F "$validation_callback" >/dev/null ||
-    pr_transaction_fail "validation callback is unavailable" ||
-    return 1
 
   expected_remote_oid=$(pr_transaction_remote_oid \
     "$push_remote" "$push_branch") || return 1
-  readonly prepare_push_helper mutation_callback validation_callback
+  export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  readonly GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  readonly prepare_push_helper mutation_callback validation_runner
+  readonly validation_command
   readonly expected_base_host expected_base_repo
   readonly expected_head_host expected_head_repo
   readonly base_remote default_branch push_remote current_branch push_branch
@@ -114,8 +128,8 @@ EOF
   readonly prepared_head_oid prepared_base_oid prepared_remote_oid
   readonly HISTORY_REWRITTEN
 
-  "$validation_callback" ||
-    pr_transaction_fail "repository validation callback failed" ||
+  "$validation_runner" "$prepared_head_oid" "$validation_command" ||
+    pr_transaction_fail "trusted validation runner failed" ||
     return 1
   validated_head_oid=$(git rev-parse HEAD) ||
     pr_transaction_fail "failed to inspect validated HEAD" ||

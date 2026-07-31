@@ -40,7 +40,7 @@ permission from the user's role, add an unverified remote, or assume
 `github.com`, `origin`, `main`, or a same-named local branch.
 
 Read [single-use push transaction](../../lib/github/commit-and-push.md) and
-resolve its two trusted helpers from the loaded skill/reference, never the
+resolve its three trusted helpers from the loaded skill/reference, never the
 consuming repository. Do not capture yet: every confirmed iteration starts a
 fresh transaction immediately before repository commit/fold work.
 
@@ -103,14 +103,15 @@ repository-local instructions and use the repository-local testing skill and
 its defined validation commands. If no validation policy is discoverable, ask
 instead of inventing project commands.
 
-Run useful focused checks while editing and inspect the diff, but do not treat
-them as final validation: commit folding and the final base rebase may still
-change `HEAD`.
+Inspect the diff while editing, but never run repository or contributor
+validation code in the credentialed worktree. It runs only at the isolated
+prepared snapshot below.
 
 ## Verify the selected fixes in one transaction
 
-Define the transaction's mutation callback to use the repository-local `git-commit` skill
-for staging, review, message format, and commit shape:
+Use the repository-local `git-commit` skill to determine staging, review,
+message format, and commit shape. Define the transaction mutation using only
+trusted edits and Git built-ins; it disables repository-configured hooks.
 
 - When repository policy permits and a finding belongs unambiguously to a
   PR-owned commit in `"$BASE_REF"..HEAD`, create a `fixup` commit for that
@@ -122,13 +123,18 @@ for staging, review, message format, and commit shape:
 - Never rewrite a base commit, guess commit syntax, or fold across an ambiguous
   ownership boundary.
 
-Define its validation callback to run repository-focused and broader checks,
-inspect the final diff, and map findings to evidence. Then invoke the shared
-transaction once. It captures the current contributor head before mutation,
-validates explicit base and head identities, prepares, validates the exact
-OID, and pushes without disk authority, using explicit `--force-with-lease`
-after rewrite. A failed callback or changed state returns without pushing; fix
-locally and invoke a wholly new transaction.
+Set the bundled validation sandbox's command to run repository-focused and
+broader checks. It archives exactly the prepared OID and runs without Git
+metadata, credentials, host home, or network. Missing bubblewrap/runtime or
+validation requiring Git metadata, hardware, or network stops the workflow;
+never fall back to credentialed execution. Use only an explicitly trusted
+project runner enforcing the same boundary, never one from the worktree.
+
+Invoke the shared transaction once. It captures the contributor head, commits
+with hooks disabled, prepares, accepts only runner success, and pushes with an
+explicit `--force-with-lease` when either the mutation signals rewrite or the
+fresh remote OID is not an ancestor. Failure returns without push; retry in a
+wholly new transaction, which re-derives rewrite state from its fresh capture.
 
 Re-read the PR head after the push and require its OID to equal local `HEAD`
 before responding to reviewers.

@@ -297,18 +297,18 @@ prepare() {
   fi
 
   HISTORY_REWRITTEN=$HISTORY_REWRITTEN_INPUT
-  if [ "$PREPARE_BEFORE_HEAD" != "$PREPARED_HEAD_OID" ]; then
+  if [ -z "$PREPARED_REMOTE_OID" ]; then
+    HISTORY_REWRITTEN=false
+  elif [ "$PREPARE_BEFORE_HEAD" != "$PREPARED_HEAD_OID" ]; then
     HISTORY_REWRITTEN=true
-    if [ -n "$PREPARED_REMOTE_OID" ]; then
-      git merge-base --is-ancestor \
-        "$PREPARED_REMOTE_OID" "$PREPARE_BEFORE_HEAD"
-      ANCESTOR_STATUS=$?
-      case "$ANCESTOR_STATUS" in
-        0) ;;
-        1) fail "remote branch is not contained in pre-prepare history" ;;
-        *) fail "failed to inspect pre-prepare ancestry" ;;
-      esac
-    fi
+    git merge-base --is-ancestor \
+      "$PREPARED_REMOTE_OID" "$PREPARE_BEFORE_HEAD"
+    ANCESTOR_STATUS=$?
+    case "$ANCESTOR_STATUS" in
+      0) ;;
+      1) fail "remote branch is not contained in pre-prepare history" ;;
+      *) fail "failed to inspect pre-prepare ancestry" ;;
+    esac
   fi
   if [ "$HISTORY_REWRITTEN" = "false" ] &&
     [ -n "$PREPARED_REMOTE_OID" ]; then
@@ -317,7 +317,7 @@ prepare() {
     ANCESTOR_STATUS=$?
     case "$ANCESTOR_STATUS" in
       0) ;;
-      1) fail "non-rewrite push would not be a fast-forward" ;;
+      1) HISTORY_REWRITTEN=true ;;
       *) fail "failed to inspect prepared ancestry" ;;
     esac
   fi

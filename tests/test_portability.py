@@ -75,6 +75,7 @@ REFERENCE_INPUTS = {
             "PUSH_REMOTE",
             "PUSH_TRANSACTION_HELPER",
             "ROLE",
+            "VALIDATION_SANDBOX",
             "WORK_BRANCH",
         }
     ),

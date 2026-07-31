@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ from tests.skill_assertions import ROOT
 
 HELPER = ROOT / "lib/github/scripts/prepare-and-push.sh"
 TRANSACTION_HELPER = ROOT / "lib/github/scripts/push-transaction.sh"
+VALIDATION_SANDBOX = ROOT / "lib/github/scripts/validation-sandbox.sh"
 
 
 class CommitAndPushBehaviorTests(unittest.TestCase):
@@ -34,6 +36,7 @@ class CommitAndPushBehaviorTests(unittest.TestCase):
         self.bin_path = self.temp_path / "bin"
         self.bin_path.mkdir()
         self.write_transport_wrappers()
+        self.trusted_validation_runner = self.write_trusted_validation_runner()
         self.environment = os.environ.copy()
         self.environment.update(
             {
@@ -122,6 +125,34 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
             encoding="utf-8",
         )
         fake_git.chmod(0o755)
+
+        fake_gh = self.bin_path / "gh"
+        fake_gh.write_text(
+            """#!/usr/bin/env sh
+printf 'gh write escaped sandbox\\n' > "$TEST_GH_WRITE_MARKER"
+exit 0
+""",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+
+    def write_trusted_validation_runner(self) -> Path:
+        runner = self.bin_path / "trusted-validation-runner"
+        runner.write_text(
+            """#!/usr/bin/env bash
+set -u
+[ "$#" -eq 2 ] || exit 2
+git cat-file -e "$1^{commit}" || exit 3
+case "$2" in
+  pass) exit 0 ;;
+  fail) exit 17 ;;
+  *) exit 19 ;;
+esac
+""",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+        return runner
 
     def git(
         self,
@@ -257,6 +288,8 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
                 str(TRANSACTION_HELPER),
                 str(HELPER),
                 self.initial_feature_oid,
+                str(self.trusted_validation_runner),
+                str(VALIDATION_SANDBOX),
             ],
             cwd=self.work,
             env=self.environment,
@@ -264,6 +297,35 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
             capture_output=True,
             text=True,
         )
+
+    def run_validation_sandbox(
+        self,
+        command: str,
+        *,
+        environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.assertTrue(
+            VALIDATION_SANDBOX.is_file(),
+            f"missing production validation sandbox: {VALIDATION_SANDBOX}",
+        )
+        return subprocess.run(
+            [
+                str(VALIDATION_SANDBOX),
+                self.initial_feature_oid,
+                command,
+            ],
+            cwd=self.work,
+            env=environment or self.environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def validation_sandbox_is_operational(self) -> bool:
+        probe = self.run_validation_sandbox(
+            "test -f base.txt && test -f feature.txt && printf 'sandbox-probe\\n'"
+        )
+        return probe.returncode == 0 and "sandbox-probe" in probe.stdout
 
     def advance_remote(
         self,
@@ -659,21 +721,148 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *sys.argv[1:
             self.remote_oid(self.push_url, "feature"),
         )
 
+    def test_validation_sandbox_uses_only_the_exact_committed_snapshot(
+        self,
+    ) -> None:
+        (self.work / "uncommitted-secret.txt").write_text(
+            "host-only\n",
+            encoding="utf-8",
+        )
+        if not self.validation_sandbox_is_operational():
+            self.skipTest("bubblewrap isolation is unavailable and fails closed")
+
+        result = self.run_validation_sandbox(
+            "test -f base.txt && test -f feature.txt && "
+            "test ! -e uncommitted-secret.txt && test ! -e .git"
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_validation_sandbox_rejects_direct_git_push(self) -> None:
+        operational = self.validation_sandbox_is_operational()
+
+        result = self.run_validation_sandbox(
+            "printf 'sandbox-started\\n'; "
+            f"git push {shlex.quote(self.push_url)} "
+            "HEAD:refs/heads/validation-attack"
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        if operational:
+            self.assertIn("sandbox-started", result.stdout)
+        self.assertEqual(
+            "",
+            self.remote_oid(self.push_url, "validation-attack"),
+        )
+
+    def test_validation_sandbox_rejects_gh_write(self) -> None:
+        marker = self.temp_path / "gh-write-marker"
+        environment = self.environment.copy()
+        environment["TEST_GH_WRITE_MARKER"] = str(marker)
+        operational = self.validation_sandbox_is_operational()
+
+        result = self.run_validation_sandbox(
+            "printf 'sandbox-started\\n'; "
+            "gh api --method POST repos/base/project/issues",
+            environment=environment,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        if operational:
+            self.assertIn("sandbox-started", result.stdout)
+        self.assertFalse(marker.exists())
+
+    def test_validation_sandbox_hides_token_ssh_and_home_credentials(self) -> None:
+        host_home = self.temp_path / "credentialed-home"
+        ssh_directory = host_home / ".ssh"
+        ssh_directory.mkdir(parents=True)
+        (ssh_directory / "id_rsa").write_text("host-private-key\n", encoding="utf-8")
+        environment = self.environment.copy()
+        environment.update(
+            {
+                "GH_TOKEN": "host-gh-token",
+                "GITHUB_TOKEN": "host-github-token",
+                "HOME": str(host_home),
+                "SSH_AUTH_SOCK": str(self.temp_path / "host-agent.sock"),
+            }
+        )
+        operational = self.validation_sandbox_is_operational()
+
+        result = self.run_validation_sandbox(
+            "printf 'sandbox-started\\n'; "
+            'if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] || '
+            '[ -n "${SSH_AUTH_SOCK:-}" ]; then exit 0; fi; '
+            'cat "$HOME/.ssh/id_rsa"',
+            environment=environment,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        if operational:
+            self.assertIn("sandbox-started", result.stdout)
+
+    def test_validation_sandbox_cannot_write_outside_snapshot(self) -> None:
+        marker = self.temp_path / "outside-validation-marker"
+        operational = self.validation_sandbox_is_operational()
+
+        result = self.run_validation_sandbox(
+            f"printf 'sandbox-started\\n'; touch {shlex.quote(str(marker))}"
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        if operational:
+            self.assertIn("sandbox-started", result.stdout)
+        self.assertFalse(marker.exists())
+
+    def test_transaction_disables_repository_configured_commit_hooks(self) -> None:
+        hook_marker = self.temp_path / "hook-marker"
+        hooks = self.temp_path / "untrusted-hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text(
+            "#!/usr/bin/env sh\n"
+            f"printf 'hook ran\\n' > {shlex.quote(str(hook_marker))}\n"
+            "git push contributor HEAD:refs/heads/hook-attack\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+        self.git(self.work, "config", "core.hooksPath", str(hooks))
+
+        result = self.run_transaction_script(
+            r"""
+source "$1" || exit 90
+commit_change() {
+  printf 'hook-safe\n' > hook-safe.txt
+  git add hook-safe.txt
+  git commit -m 'hook safe transaction'
+}
+VALIDATION_COMMAND=pass pr_push_transaction "$2" commit_change "$4" \
+  ghe.example.test base/project ghe.example.test contributor/project \
+  base main contributor feature feature
+"""
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(hook_marker.exists())
+        self.assertEqual("", self.remote_oid(self.push_url, "hook-attack"))
+        self.assertEqual(
+            self.git_output(self.work, "rev-parse", "HEAD"),
+            self.remote_oid(self.push_url, "feature"),
+        )
+
     def test_failed_validation_then_fresh_transaction_recaptures_and_pushes(
         self,
     ) -> None:
         result = self.run_transaction_script(
             r"""
 source "$1" || exit 90
-apply_change() {
-  printf 'retry\n' > retry.txt
-  git add retry.txt
-  git commit -m 'retry transaction'
+rewrite_change() {
+  printf 'retry rewrite\n' >> feature.txt
+  git add feature.txt
+  git commit --amend --no-edit
+  HISTORY_REWRITTEN=true
 }
 no_change() { :; }
-fail_validation() { return 17; }
-pass_validation() { :; }
-if pr_push_transaction "$2" apply_change fail_validation \
+if VALIDATION_COMMAND=fail pr_push_transaction "$2" rewrite_change "$4" \
   ghe.example.test base/project ghe.example.test contributor/project \
   base main contributor feature feature; then
   exit 91
@@ -681,7 +870,7 @@ fi
 REMOTE_AFTER_FAIL=$(git ls-remote --heads contributor refs/heads/feature |
   awk 'NR == 1 {print $1}') || exit 1
 [ "$REMOTE_AFTER_FAIL" = "$3" ] || exit 92
-pr_push_transaction "$2" no_change pass_validation \
+VALIDATION_COMMAND=pass pr_push_transaction "$2" no_change "$4" \
   ghe.example.test base/project ghe.example.test contributor/project \
   base main contributor feature feature
 """
@@ -689,6 +878,7 @@ pr_push_transaction "$2" no_change pass_validation \
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertNotIn("readonly variable", result.stderr)
+        self.assertIn("Push mode: leased", result.stdout)
         self.assertEqual(
             self.git_output(self.work, "rev-parse", "HEAD"),
             self.remote_oid(self.push_url, "feature"),
@@ -711,15 +901,14 @@ iteration_two() {
   git commit --amend --no-edit
   HISTORY_REWRITTEN=true
 }
-pass_validation() { :; }
-pr_push_transaction "$2" iteration_one pass_validation \
+VALIDATION_COMMAND=pass pr_push_transaction "$2" iteration_one "$4" \
   ghe.example.test base/project ghe.example.test contributor/project \
   base main contributor feature feature || exit 1
 FIRST_PUSHED=$(git rev-parse HEAD) || exit 1
 FIRST_REMOTE=$(git ls-remote --heads contributor refs/heads/feature |
   awk 'NR == 1 {print $1}') || exit 1
 [ "$FIRST_REMOTE" = "$FIRST_PUSHED" ] || exit 93
-pr_push_transaction "$2" iteration_two pass_validation \
+VALIDATION_COMMAND=pass pr_push_transaction "$2" iteration_two "$4" \
   ghe.example.test base/project ghe.example.test contributor/project \
   base main contributor feature feature
 """

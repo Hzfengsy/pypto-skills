@@ -106,7 +106,7 @@ after its checkout succeeds, set `PR_HEAD_BRANCH="$CURRENT_BRANCH"` and
 ## Capture push authority before commit work
 
 Read [prepare, validate, and push](../../lib/github/commit-and-push.md) and
-resolve both trusted helpers from that reference, never `REPO_ROOT`/CWD. For
+resolve all three trusted helpers from that reference, never `REPO_ROOT`/CWD. For
 `create`, this follows branch checkout; for `update`, it follows the verified
 head checkout. Enter its single-use transaction immediately before commit
 work. Pass `GITHUB_HOST`/`PR_REPO` as the expected base identity and the
@@ -114,21 +114,23 @@ verified head host/repository, remote, and branch as the head authority.
 
 ## Commit intentionally
 
-The transaction's mutation callback uses the repository-local `git-commit` skill
-for uncommitted changes. Let it apply repository review, tests, message
-syntax, and commit shape. If unavailable, stop and ask how this repository
-commits; do not invent a generic workflow. Mark its transaction-local
-`HISTORY_REWRITTEN=true` only after amend, rebase, or another rewrite.
+Use the repository-local `git-commit` skill for review, staging, message
+syntax, and commit shape. If unavailable, ask; do not invent a workflow.
+Define the transaction mutation with trusted edits and Git built-ins only.
+The transaction disables repository-configured hooks; never execute
+repository validation code in its credentialed shell.
 
-Its validation callback requires a clean worktree, a nonempty
-`"$BASE_REF"..HEAD` range, and all repository-defined focused and broader
-checks against exactly `PREPARED_HEAD_OID`. It must not mutate Git state.
-Shared `prepare` refreshes/rebases, and shared `push` revalidates base and head
-URLs, refuses OID drift, and uses explicit `--force-with-lease` after rewrite.
+Give the bundled validation sandbox the focused and broader command. It
+archives exactly `PREPARED_HEAD_OID` and exposes no Git metadata, credentials,
+host home, or network. Missing isolation/runtime, or checks requiring Git
+metadata, hardware, or network, stop the workflow. Never fall back to
+credentialed execution; only an explicitly trusted project runner enforcing
+the same boundary may replace it. Shared `prepare` derives rewrite state from
+the fresh remote OID, and `push` uses explicit `--force-with-lease` when needed.
 
 One function/subshell invocation is one transaction: it captures the remote
 head before mutation and keeps readonly authority scoped inside that
-invocation. A failed callback, changed `HEAD`, conflict, or later fix iteration
+invocation. A failed runner, changed `HEAD`, conflict, or later fix iteration
 must start a fresh transaction and recapture all identities, OIDs, and rewrite
 state. Never reuse a lease or prepared value. Resolve conflicts under
 repository policy or use `git rebase --abort`; never destructively reset work.

@@ -7,7 +7,9 @@ consuming repository:
 - [`scripts/prepare-and-push.sh`](scripts/prepare-and-push.sh) as the absolute
   executable `PREPARE_PUSH_HELPER`;
 - [`scripts/push-transaction.sh`](scripts/push-transaction.sh) as
-  `PUSH_TRANSACTION_HELPER`, then source it.
+  `PUSH_TRANSACTION_HELPER`, then source it;
+- [`scripts/validation-sandbox.sh`](scripts/validation-sandbox.sh) as the
+  absolute executable `VALIDATION_SANDBOX`.
 
 The transaction function runs in a subshell. Authority becomes readonly only
 inside that invocation and disappears on return. It stores no checkpoint.
@@ -71,29 +73,36 @@ remote_targets_repo "$PUSH_REMOTE" "$EXPECTED_PUSH_REPO" || {
 source "$PUSH_TRANSACTION_HELPER" || exit 1
 
 apply_transaction_changes() {
-  # Apply/stage/commit/fold only through repository-approved policy.
-  # Set HISTORY_REWRITTEN=true here after amend/autosquash/rebase.
+  # Apply/stage/commit/fold with trusted Git built-ins only. The transaction
+  # disables repository-configured hooks. Never execute repository code here.
   :
 }
-validate_transaction_head() {
-  # Run repository-defined focused and broader checks as child processes.
-  :
-}
+VALIDATION_RUNNER="$VALIDATION_SANDBOX"
+VALIDATION_COMMAND='run repository-defined focused and broader checks'
 
 pr_push_transaction "$PREPARE_PUSH_HELPER" \
-  apply_transaction_changes validate_transaction_head \
+  apply_transaction_changes "$VALIDATION_RUNNER" \
   "$EXPECTED_BASE_HOST" "$EXPECTED_BASE_REPO" \
   "$EXPECTED_HEAD_HOST" "$EXPECTED_PUSH_REPO" \
   "$BASE_REMOTE" "$DEFAULT_BRANCH" "$PUSH_REMOTE" \
   "$CURRENT_BRANCH" "$PUSH_BRANCH" || exit 1
 ```
 
-Replace the callback bodies, not the transaction mechanics. The mutation
-callback runs after the exact remote head is captured and may update the
-dynamically scoped `HISTORY_REWRITTEN`; it must leave a clean committed
-worktree. The validation callback runs after the final base fetch/rebase and
-must not source contributor code, change `HEAD`, dirty the worktree, switch
-branches, or fetch.
+Replace the mutation body and validation command, not the transaction
+mechanics. The mutation runs after remote-head capture, may set
+`HISTORY_REWRITTEN=true`, and must leave a clean commit. The transaction
+exports a readonly `core.hooksPath=/dev/null` override; run hook policy and all
+other repository code only as validation.
+
+The bundled runner archives exactly `PREPARED_HEAD_OID`, extracts it without
+Git metadata, then uses bubblewrap with a new user/PID/network namespace, an
+empty environment and home, read-only system runtime, and only the snapshot
+writable. It passes no Git remote, token, SSH agent, host home, or network.
+Bubblewrap or a required runtime being unavailable is a validation failure.
+Never fall back to credentialed execution. If validation needs Git metadata,
+hardware, network, or another unavailable runtime, stop and require an
+explicitly trusted project runner that enforces the same credential-free,
+network-denied boundary; never select a runner from the worktree.
 
 ## Identity and push guarantees
 
@@ -104,9 +113,12 @@ head fetch URL plus the sole push URL to map to the expected head. `push`
 repeats both identity checks, verifies local/base/head OIDs, then repeats the
 URL checks immediately before its only write.
 
-A non-rewrite uses a normal push. Rewritten published history uses explicit
-`git push --force-with-lease` against the head OID captured by this invocation.
-The helper rejects a same-repository base/default target.
+A non-rewrite uses a normal push. For a published branch, `prepare` preserves
+an explicit rewrite signal and also derives rewrite state by checking whether
+the freshly captured remote OID is an ancestor of the prepared head. Rewritten
+history uses explicit `git push --force-with-lease` against that OID. An
+unpublished branch is never a rewrite. The helper rejects a same-repository
+base/default target.
 
 ## Retry and iteration rule
 
