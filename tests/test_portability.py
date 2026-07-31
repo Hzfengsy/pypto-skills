@@ -75,7 +75,9 @@ REFERENCE_INPUTS = {
     "common-issues.md": frozenset(
         {"PR_NUMBER", "PR_REPO", "REPOSITORY_NODE_ID"}
     ),
-    "detect-permission.md": frozenset({"PR_NUMBER", "PR_REPO"}),
+    "detect-permission.md": frozenset(
+        {"GITHUB_HOST", "PR_NUMBER", "PR_REPO"}
+    ),
     "fetch-comments.md": frozenset(
         {
             "COMMENTS_CURSOR",
@@ -223,7 +225,8 @@ class PortabilityTests(unittest.TestCase):
     ) -> None:
         reference = bash_source(ROOT / "lib/github/detect-permission.md")
         self.assertIn(
-            'HEAD_CAN_PUSH=$(gh api "repos/$HEAD_REPO"',
+            'HEAD_CAN_PUSH=$(gh api --hostname "$GITHUB_HOST" '
+            '"repos/$HEAD_REPO"',
             reference,
         )
         self.assertIn('[ "$HEAD_CAN_PUSH" != "true" ]', reference)

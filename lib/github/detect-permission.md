@@ -41,7 +41,8 @@ BASE_CAN_PUSH=$(gh api "repos/$PR_REPO" --jq '.permissions.push // false') || {
   echo "Error: base-repository permission could not be checked" >&2
   exit 1
 }
-HEAD_CAN_PUSH=$(gh api "repos/$HEAD_REPO" --jq '.permissions.push // false') || {
+HEAD_CAN_PUSH=$(gh api --hostname "$GITHUB_HOST" "repos/$HEAD_REPO" \
+  --jq '.permissions.push // false') || {
   echo "Error: head-repository permission could not be checked" >&2
   exit 1
 }
