@@ -48,8 +48,11 @@ REFERENCE_INPUTS = {
     "lookup-pr.md": frozenset(
         {
             "CURRENT_BRANCH",
+            "GITHUB_HOST",
             "PR_HEAD_BRANCH",
             "PR_HEAD_PREFIX",
+            "PR_LOOKUP_ALLOW_NONE",
+            "PR_LOOKUP_HELPER",
             "PR_NUMBER",
             "PR_REPO",
         }
@@ -257,10 +260,9 @@ class PortabilityTests(unittest.TestCase):
         self.assertIn("DEFAULT_BRANCH", text)
         self.assertIn("PR_REPO", text)
         self.assertIn("--force-with-lease", text)
-        self.assertRegex(
-            text,
-            r'if \[ -n "\$\{PR_NUMBER:-\}" \]; then\s+PR_ROUTE="update"',
-        )
+        self.assertIn("PR_ROUTE=$(printf '%s' \"$PR_LOOKUP_RESULT\"", text)
+        self.assertIn('[ "$PR_ROUTE" = "create" ]', text)
+        self.assertIn('[ "$PR_ROUTE" = "update" ]', text)
 
     def test_github_pr_delegates_repository_commit_policy(self) -> None:
         skill = ROOT / "skills/github-pr/SKILL.md"
@@ -281,10 +283,64 @@ class PortabilityTests(unittest.TestCase):
 
         text = skill.read_text(encoding="utf-8")
         self.assertIn('GH_HOST="$GITHUB_HOST"', text)
-        self.assertIn('--head "${PR_HEAD_PREFIX}${CURRENT_BRANCH}"', text)
+        self.assertIn("../../lib/github/scripts/pr-context.sh", text)
+        self.assertIn('--head "$CREATE_HEAD"', text)
         self.assertIn("ROLE", text)
         self.assertIn("HEAD_REPO", text)
         self.assertIn("MAINTAINER_CHECKOUT_VERIFIED", text)
+
+        guard = text.find('"$PR_CONTEXT_HELPER" guard-branch')
+        commit = text.find("repository-local `git-commit` skill")
+        self.assertGreaterEqual(guard, 0)
+        self.assertGreater(commit, guard)
+
+    def test_pull_request_lookup_uses_supported_host_pinned_rest_api(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        reference = ROOT / "lib/github/lookup-pr.md"
+        helper = ROOT / "lib/github/scripts/pr-context.sh"
+        for path in (skill, reference, helper):
+            with self.subTest(path=path):
+                self.assertTrue(path.is_file(), f"missing required file: {path}")
+        if not all(path.is_file() for path in (skill, reference, helper)):
+            return
+
+        skill_text = skill.read_text(encoding="utf-8")
+        reference_text = reference.read_text(encoding="utf-8")
+        helper_text = helper.read_text(encoding="utf-8")
+        self.assertIn("../../lib/github/scripts/pr-context.sh", skill_text)
+        self.assertIn("scripts/pr-context.sh", reference_text)
+        for document_text in (skill_text, reference_text):
+            self.assertIn(
+                'gh api --hostname "$GITHUB_HOST" --method GET',
+                document_text,
+            )
+            self.assertIn('"repos/$PR_REPO/pulls"', document_text)
+            self.assertIn('-f "head=$HEAD_SELECTOR"', document_text)
+            self.assertIn("--paginate --slurp --jq 'add'", document_text)
+        self.assertNotRegex(bash_source(skill), r"gh pr list[\s\S]{0,200}--head")
+        self.assertNotRegex(reference_text, r"gh pr list[\s\S]{0,200}--head")
+        self.assertIn('gh api --hostname "$GITHUB_HOST" --method GET', helper_text)
+        self.assertIn('"repos/$PR_REPO/pulls"', helper_text)
+        self.assertIn('-f "head=$HEAD_SELECTOR"', helper_text)
+        self.assertIn("--paginate --slurp --jq 'add'", helper_text)
+
+    def test_known_pr_number_is_validated_before_positional_gh_use(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        reference = ROOT / "lib/github/lookup-pr.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        self.assertTrue(reference.is_file(), f"missing required reference: {reference}")
+        if not skill.is_file() or not reference.is_file():
+            return
+
+        skill_text = skill.read_text(encoding="utf-8")
+        reference_text = reference.read_text(encoding="utf-8")
+        self.assertIn('"$PR_CONTEXT_HELPER" validate-number "$PR_NUMBER"', skill_text)
+        validation = reference_text.find(
+            '"$PR_LOOKUP_HELPER" validate-number "$PR_NUMBER"'
+        )
+        positional_use = reference_text.find('gh pr view "$PR_NUMBER"')
+        self.assertGreaterEqual(validation, 0)
+        self.assertGreater(positional_use, validation)
 
     def test_github_pr_derives_title_and_body_from_pr_commit_range(self) -> None:
         skill = ROOT / "skills/github-pr/SKILL.md"

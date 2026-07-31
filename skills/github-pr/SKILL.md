@@ -22,44 +22,64 @@ for every GitHub CLI command:
 export GH_HOST="$GITHUB_HOST"
 ```
 
-If the user supplied a PR number, take the update route. Otherwise, probe the
-current head without guessing a remote name or selecting the first ambiguous
-match:
+Resolve the shared [PR context
+helper](../../lib/github/scripts/pr-context.sh) relative to this file and store
+its absolute path in `PR_CONTEXT_HELPER`. Pass it to [pull-request
+lookup](../../lib/github/lookup-pr.md):
 
 ```bash
 if [ -n "${PR_NUMBER:-}" ]; then
-  PR_ROUTE="update"
+  "$PR_CONTEXT_HELPER" validate-number "$PR_NUMBER" >/dev/null || exit 1
+  PR_LOOKUP_ALLOW_NONE=false
 else
-  HEAD_SELECTOR="${PR_HEAD_PREFIX}${CURRENT_BRANCH}"
-  PR_CANDIDATES=$(GH_HOST="$GITHUB_HOST" gh pr list \
-    --repo "$PR_REPO" --state open --head "$HEAD_SELECTOR" \
-    --json number) || exit 1
-  PR_COUNT=$(printf '%s' "$PR_CANDIDATES" | jq 'length')
-
-  case "$PR_COUNT" in
-    0) PR_ROUTE="create" ;;
-    1)
-      PR_ROUTE="update"
-      PR_NUMBER=$(printf '%s' "$PR_CANDIDATES" | jq -r '.[0].number')
-      ;;
-    *)
-      echo "Error: multiple open pull requests match $HEAD_SELECTOR" >&2
-      exit 1
-      ;;
-  esac
+  PR_LOOKUP_ALLOW_NONE=true
 fi
+PR_LOOKUP_HELPER="$PR_CONTEXT_HELPER"
 ```
 
-An existing pull request is an update route, never a reason to exit. The later
-push updates its commits; `gh pr edit` updates its metadata.
+Read and run the lookup reference now. It uses host-pinned REST for exact
+fork-owner/head filtering and returns a deterministic route. Its canonical
+query is:
+
+```text
+gh api --hostname "$GITHUB_HOST" --method GET \
+  "repos/$PR_REPO/pulls" -f state=open -f "head=$HEAD_SELECTOR" \
+  -f per_page=100 --paginate --slurp --jq 'add'
+```
+
+```bash
+PR_ROUTE=$(printf '%s' "$PR_LOOKUP_RESULT" | jq -r '.route')
+case "$PR_ROUTE" in
+  create|update) ;;
+  *)
+    echo "Error: unsupported pull-request route: $PR_ROUTE" >&2
+    exit 1
+    ;;
+esac
+```
+
+An existing pull request always yields `update`, never `create` or an early
+successful exit.
 
 ## Verify an existing PR and its writable head
 
-For the update route, read and run [pull-request
-lookup](../../lib/github/lookup-pr.md) with `PR_NUMBER`, then
-[permission detection](../../lib/github/detect-permission.md). This
-distinguishes the author (`ROLE=owner` or `ROLE=fork`) from a maintainer and
-verifies permission on `HEAD_REPO`.
+For the update route, read and run [permission
+detection](../../lib/github/detect-permission.md). This distinguishes the
+author (`ROLE=owner` or `ROLE=fork`) from a maintainer and verifies permission
+on `HEAD_REPO`.
+
+Immediately after permission detection, guard the verified head before any
+repository-local commit workflow:
+
+```bash
+if [ "$PR_ROUTE" = "update" ]; then
+  "$PR_CONTEXT_HELPER" guard-branch \
+    "$ROLE" "$CURRENT_BRANCH" "$PR_HEAD_BRANCH" || exit 1
+fi
+```
+
+An owner or fork mismatch stops here, so dirty changes cannot be committed to
+the wrong branch.
 
 When `ROLE=maintainer` and the PR head is not the current local branch, require
 a clean worktree, then read and run [cross-fork
@@ -106,10 +126,16 @@ Create a new PR with the fork-qualified head discovered by setup:
 
 ```bash
 if [ "$PR_ROUTE" = "create" ]; then
+  CREATE_HEAD=$("$PR_CONTEXT_HELPER" create-head \
+    "$LOCAL_REPO" "$PR_REPO" "$CURRENT_BRANCH" "$IS_FORK") || exit 1
+  if [ "$CREATE_HEAD" != "${PR_HEAD_PREFIX}${CURRENT_BRANCH}" ]; then
+    echo "Error: create head disagrees with discovered fork context" >&2
+    exit 1
+  fi
   PR_URL=$(GH_HOST="$GITHUB_HOST" gh pr create \
     --repo "$PR_REPO" \
     --base "$DEFAULT_BRANCH" \
-    --head "${PR_HEAD_PREFIX}${CURRENT_BRANCH}" \
+    --head "$CREATE_HEAD" \
     --title "$PR_TITLE" \
     --body "$PR_BODY") || exit 1
 fi
@@ -157,8 +183,9 @@ GH_HOST="$GITHUB_HOST" gh pr view "${PR_NUMBER:-$PR_URL}" \
 
 - Assuming `main`, `origin`, a public GitHub host, or the current repository is
   the PR base.
-- Using a bare branch in `--head` for a fork instead of
-  `${PR_HEAD_PREFIX}${CURRENT_BRANCH}`.
+- Using `gh pr list --head OWNER:BRANCH`; that syntax is unsupported. Use the
+  shared host-pinned REST lookup.
 - Exiting when a PR already exists instead of updating its branch and metadata.
+- Committing before an author/fork PR head is verified against the local branch.
 - Applying maintainer edits without verified head-repository push permission.
 - Inventing commit prefixes, PR checklists, titles, or body content.
