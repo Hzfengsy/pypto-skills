@@ -224,6 +224,107 @@ class CleanBranchesBehaviorTests(unittest.TestCase):
                 result = self.helper(*arguments)
                 self.assertEqual(expected, result.stdout.strip())
 
+    def test_classifies_local_and_remote_refs_with_independent_tips(self) -> None:
+        remote_oid = self.rev_parse("feature/current")
+        self.git("branch", "split-tip", self.regular_oid)
+        self.git(
+            "push",
+            "origin",
+            f"{remote_oid}:refs/heads/split-tip",
+        )
+        self.git("fetch", "origin")
+
+        local_result = self.helper(
+            "classify",
+            "split-tip",
+            "refs/heads/split-tip",
+            "trunk",
+            "trunk",
+            remote_oid,
+        )
+        remote_result = self.helper(
+            "classify",
+            "split-tip",
+            "refs/remotes/origin/split-tip",
+            "trunk",
+            "trunk",
+            remote_oid,
+        )
+
+        self.assertEqual("normal-merge", local_result.stdout.strip())
+        self.assertEqual("squash-merge", remote_result.stdout.strip())
+
+    def test_classifies_remote_only_ref(self) -> None:
+        remote_oid = self.rev_parse("feature/current")
+        self.git(
+            "push",
+            "origin",
+            f"{remote_oid}:refs/heads/remote-only",
+        )
+        self.git("fetch", "origin")
+
+        result = self.helper(
+            "classify",
+            "remote-only",
+            "refs/remotes/origin/remote-only",
+            "trunk",
+            "trunk",
+            remote_oid,
+        )
+
+        self.assertEqual("squash-merge", result.stdout.strip())
+
+    def test_classify_rejects_non_full_or_mismatched_branch_ref(self) -> None:
+        invalid_refs = (
+            "regular",
+            "refs/heads/squash-exact",
+            "refs/tags/regular",
+        )
+
+        for branch_ref in invalid_refs:
+            with self.subTest(branch_ref=branch_ref):
+                result = self.helper(
+                    "classify",
+                    "regular",
+                    branch_ref,
+                    "trunk",
+                    "trunk",
+                    check=False,
+                )
+                self.assertNotEqual(0, result.returncode)
+
+    def test_classify_fails_closed_when_merge_base_errors(self) -> None:
+        real_git = shutil.which("git")
+        if real_git is None:
+            self.fail("git executable is required")
+        wrapper_directory = self.root / "merge-base-error-bin"
+        wrapper_directory.mkdir()
+        git_wrapper = wrapper_directory / "git"
+        git_wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "merge-base" ]; then\n'
+            "  exit 42\n"
+            "fi\n"
+            f'exec {shlex.quote(real_git)} "$@"\n',
+            encoding="utf-8",
+        )
+        git_wrapper.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{wrapper_directory}{os.pathsep}{environment['PATH']}"
+
+        result = self.helper(
+            "classify",
+            "squash-exact",
+            "refs/heads/squash-exact",
+            "trunk",
+            "trunk",
+            self.squash_oid,
+            check=False,
+            env=environment,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+
     def test_local_delete_protects_current_and_default_branches(self) -> None:
         protected = (
             ("trunk", self.rev_parse("trunk")),
@@ -305,6 +406,90 @@ class CleanBranchesBehaviorTests(unittest.TestCase):
         self.assertEqual(
             expected_oid,
             self.rev_parse("refs/heads/linked-worktree"),
+        )
+
+    def test_local_delete_fails_closed_when_worktree_listing_errors(self) -> None:
+        branch = "worktree-list-error"
+        expected_oid = self.regular_oid
+        self.git("branch", branch, expected_oid)
+        self.git("config", f"branch.{branch}.test-marker", "preserve-on-error")
+
+        real_git = shutil.which("git")
+        if real_git is None:
+            self.fail("git executable is required")
+        wrapper_directory = self.root / "worktree-error-bin"
+        wrapper_directory.mkdir()
+        git_wrapper = wrapper_directory / "git"
+        git_wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "worktree" ] && [ "$2" = "list" ]; then\n'
+            "  exit 42\n"
+            "fi\n"
+            f'exec {shlex.quote(real_git)} "$@"\n',
+            encoding="utf-8",
+        )
+        git_wrapper.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{wrapper_directory}{os.pathsep}{environment['PATH']}"
+
+        result = self.helper(
+            "delete-local",
+            branch,
+            expected_oid,
+            "trunk",
+            check=False,
+            env=environment,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(
+            expected_oid,
+            self.rev_parse(f"refs/heads/{branch}"),
+        )
+        self.assertEqual(
+            "preserve-on-error",
+            self.git(
+                "config",
+                "--get",
+                f"branch.{branch}.test-marker",
+            ).stdout.strip(),
+        )
+
+    def test_local_delete_fails_closed_when_worktree_search_errors(self) -> None:
+        branch = "worktree-search-error"
+        expected_oid = self.regular_oid
+        self.git("branch", branch, expected_oid)
+        self.git("config", f"branch.{branch}.test-marker", "preserve-on-error")
+
+        wrapper_directory = self.root / "worktree-search-error-bin"
+        wrapper_directory.mkdir()
+        grep_wrapper = wrapper_directory / "grep"
+        grep_wrapper.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+        grep_wrapper.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{wrapper_directory}{os.pathsep}{environment['PATH']}"
+
+        result = self.helper(
+            "delete-local",
+            branch,
+            expected_oid,
+            "trunk",
+            check=False,
+            env=environment,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(
+            expected_oid,
+            self.rev_parse(f"refs/heads/{branch}"),
+        )
+        self.assertEqual(
+            "preserve-on-error",
+            self.git(
+                "config",
+                "--get",
+                f"branch.{branch}.test-marker",
+            ).stdout.strip(),
         )
 
     def test_local_atomic_delete_rejects_advance_after_last_read(self) -> None:

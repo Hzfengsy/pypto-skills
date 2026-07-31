@@ -26,6 +26,22 @@ branch_ref_for() {
   printf '%s\n' "$full_branch_ref"
 }
 
+classification_ref_for() {
+  short_branch=$1
+  supplied_ref=$2
+  local_branch_ref=$(branch_ref_for "$short_branch")
+  git check-ref-format "$supplied_ref" >/dev/null 2>&1 ||
+    fail "invalid full branch ref: $supplied_ref"
+  case "$supplied_ref" in
+    "$local_branch_ref" | refs/remotes/*/"$short_branch")
+      ;;
+    *)
+      fail "branch ref does not match branch name: $supplied_ref"
+      ;;
+  esac
+  printf '%s\n' "$supplied_ref"
+}
+
 require_expected_oid() {
   case "$1" in
     "" | *[!0-9a-f]*)
@@ -49,9 +65,14 @@ protect_branch() {
     fail "refusing to delete current branch: $branch"
   [ "$branch" != "$default_branch" ] ||
     fail "refusing to delete default branch: $branch"
-  if git worktree list --porcelain |
-    grep -Fqx "branch $branch_ref"; then
+  worktree_output=$(git worktree list --porcelain) ||
+    fail "unable to enumerate worktrees"
+  if grep -Fqx "branch $branch_ref" <<<"$worktree_output"; then
     fail "refusing to delete branch checked out in a linked worktree: $branch"
+  else
+    worktree_search_status=$?
+    [ "$worktree_search_status" -eq 1 ] ||
+      fail "unable to search enumerated worktrees"
   fi
 }
 
@@ -63,7 +84,7 @@ classify() {
   default_branch=$4
   shift 4
 
-  branch_ref=$(branch_ref_for "$branch")
+  branch_ref=$(classification_ref_for "$branch" "$branch_ref")
   current_branch=$(git branch --show-current)
   [ -n "$current_branch" ] ||
     fail "detached HEAD is unsupported"
@@ -83,6 +104,10 @@ classify() {
   if git merge-base --is-ancestor "$branch_oid" "$base_oid"; then
     printf '%s\n' normal-merge
     return
+  else
+    merge_base_status=$?
+    [ "$merge_base_status" -eq 1 ] ||
+      fail "unable to compare branch ref with base ref"
   fi
 
   for pr_head_oid in "$@"; do

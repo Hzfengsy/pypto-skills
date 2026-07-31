@@ -51,6 +51,11 @@ Pass every returned `headRefOid` to the helper:
   <merged-PR-head-OIDs...>
 ```
 
+Pass the exact enumerated full ref as `BRANCH_REF`: either
+`refs/heads/$BRANCH_NAME` or
+`refs/remotes/$PUSH_REMOTE/$BRANCH_NAME`. The helper validates and reads that
+specific ref without substituting a same-named local branch.
+
 Only `normal-merge` and `squash-merge` are candidates. An exact
 `headRefOid` match is required for a squash merge. Protect
 `reused-or-unfinished`, lookup failures, current/default refs, and uncertain
