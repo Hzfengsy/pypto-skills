@@ -387,6 +387,140 @@ class PortabilityTests(unittest.TestCase):
         self.assertNotIn("Brief description of changes", text)
         self.assertNotIn("Key change 1", text)
 
+    def test_fix_pr_uses_all_shared_workflow_references(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        expected_links = (
+            "../../lib/github/setup.md",
+            "../../lib/github/lookup-pr.md",
+            "../../lib/github/fetch-comments.md",
+            "../../lib/github/detect-permission.md",
+            "../../lib/github/checkout-fork-branch.md",
+            "../../lib/github/commit-and-push.md",
+            "../../lib/github/reply-and-resolve.md",
+            "../../lib/github/common-issues.md",
+        )
+        for link in expected_links:
+            with self.subTest(link=link):
+                self.assertIn(link, text)
+
+    def test_fix_pr_fetches_every_feedback_surface_and_page(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        for surface in ("reviewThreads", "reviews", "comments"):
+            with self.subTest(surface=surface):
+                self.assertIn(surface, text)
+        self.assertIn("hasNextPage", text)
+        self.assertIn("endCursor", text)
+        self.assertIn("nested `comments`", text)
+        self.assertIn("handled ledger", text)
+
+    def test_fix_pr_waits_for_pending_ci_and_supports_external_checks(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("Pending checks are not clean", text)
+        self.assertIn("whole-run logs", text)
+        self.assertIn("completed", text)
+        self.assertIn("external check", text.lower())
+        self.assertIn("details URL", text)
+
+    def test_fix_pr_is_host_aware_and_selects_a_verified_write_path(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn('GH_HOST="$GITHUB_HOST"', text)
+        permission = text.find("../../lib/github/detect-permission.md")
+        checkout = text.find("../../lib/github/checkout-fork-branch.md")
+        commit = text.find("../../lib/github/commit-and-push.md")
+        self.assertGreaterEqual(permission, 0)
+        self.assertGreater(checkout, permission)
+        self.assertGreater(commit, checkout)
+        for role in ("owner", "fork", "maintainer"):
+            with self.subTest(role=role):
+                self.assertIn(f"`{role}`", text)
+
+    def test_fix_pr_requires_confirmation_before_scoped_fixes(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        findings = text.find("## Classify and present findings")
+        confirmation = text.find("## Explicit confirmation gate")
+        fixes = text.find("## Apply and verify selected fixes")
+        self.assertGreaterEqual(findings, 0)
+        self.assertGreater(confirmation, findings)
+        self.assertGreater(fixes, confirmation)
+        self.assertIn("fix immediately", text)
+
+    def test_fix_pr_delegates_repository_policy(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("repository-local instructions", text)
+        self.assertIn("repository-local testing skill", text)
+        self.assertIn("repository-local `git-commit` skill", text)
+        self.assertNotRegex(text, r"\b(?:pytest|cargo test|npm test)\b")
+        self.assertNotIn('git commit -m "fix(pr)', text)
+
+    def test_fix_pr_folds_commits_and_pushes_with_shared_safety(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("fixup", text)
+        self.assertIn("autosquash", text)
+        self.assertIn("PR-owned commit", text)
+        self.assertIn("--force-with-lease", text)
+
+    def test_fix_pr_replies_then_resolves_only_verified_fixes(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        verified = text.find("Verify the selected fixes")
+        reply = text.find("Reply first")
+        resolve = text.find("Resolve second")
+        self.assertGreaterEqual(verified, 0)
+        self.assertGreater(reply, verified)
+        self.assertGreater(resolve, reply)
+        self.assertIn("isResolved", text)
+
+    def test_fix_pr_rechecks_with_iteration_and_stuck_bounds(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("maximum of 5 iterations", text)
+        self.assertIn("same fingerprint", text)
+        self.assertIn("final recheck", text)
+        self.assertIn("blocker", text)
+
     def test_clean_branches_uses_portable_safe_deletion_contract(self) -> None:
         skill = ROOT / "skills/clean-branches/SKILL.md"
         helper = ROOT / "skills/clean-branches/scripts/clean-branches.sh"
