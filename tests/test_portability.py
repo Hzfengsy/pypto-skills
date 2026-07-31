@@ -65,10 +65,13 @@ REFERENCE_INPUTS = {
             "BASE_REMOTE",
             "CURRENT_BRANCH",
             "DEFAULT_BRANCH",
+            "GITHUB_HOST",
             "HEAD_REPO",
-            "HISTORY_REWRITTEN",
             "LOCAL_REPO",
             "MAINTAINER_CHECKOUT_VERIFIED",
+            "PREPARED_BASE_OID",
+            "PREPARED_HEAD_OID",
+            "PREPARED_REMOTE_OID",
             "PREPARE_PUSH_HELPER",
             "PR_HEAD_BRANCH",
             "PUSH_REMOTE",
@@ -248,6 +251,34 @@ class PortabilityTests(unittest.TestCase):
         for link in expected_links:
             with self.subTest(link=link):
                 self.assertIn(link, text)
+
+    def test_pull_request_skills_fit_the_portable_instruction_budget(self) -> None:
+        for relative_path in ("skills/fix-pr/SKILL.md", "skills/github-pr/SKILL.md"):
+            path = ROOT / relative_path
+            with self.subTest(path=relative_path):
+                self.assertLessEqual(
+                    len(path.read_text(encoding="utf-8").splitlines()),
+                    200,
+                )
+
+    def test_github_pr_selects_create_branch_before_push_authority(self) -> None:
+        text = (ROOT / "skills/github-pr/SKILL.md").read_text(encoding="utf-8")
+        branch_selection = text.find("## Select and verify the working branch")
+        authority_capture = text.find("## Capture push authority before commit work")
+        self.assertGreaterEqual(branch_selection, 0)
+        self.assertGreater(authority_capture, branch_selection)
+
+    def test_github_pr_fails_closed_when_branch_state_commands_fail(self) -> None:
+        source = bash_source(ROOT / "skills/github-pr/SKILL.md")
+        self.assertIn(
+            "WORKTREE_STATUS=$(git status --porcelain) || {",
+            source,
+        )
+        self.assertIn(
+            'COMMITS_AHEAD=$(git rev-list --count "$BASE_REF"..HEAD) || {',
+            source,
+        )
+        self.assertNotRegex(source, r'\[ [^\n]*"\$\(git (?:status|rev-list)')
 
     def test_github_pr_supports_create_and_existing_pr_update_routes(self) -> None:
         skill = ROOT / "skills/github-pr/SKILL.md"

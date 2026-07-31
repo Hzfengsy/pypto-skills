@@ -5,12 +5,14 @@ set -u
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  prepare-and-push.sh prepare CHECKPOINT BASE_REMOTE DEFAULT_BRANCH \
-    PUSH_REMOTE CURRENT_BRANCH PUSH_BRANCH HISTORY_REWRITTEN EXPECTED_REMOTE_OID
-  prepare-and-push.sh push CHECKPOINT
+  prepare-and-push.sh prepare BASE_REMOTE DEFAULT_BRANCH PUSH_REMOTE \
+    CURRENT_BRANCH PUSH_BRANCH HISTORY_REWRITTEN EXPECTED_REMOTE_OID
+  prepare-and-push.sh push EXPECTED_HOST EXPECTED_REPO BASE_REMOTE \
+    DEFAULT_BRANCH PUSH_REMOTE CURRENT_BRANCH PUSH_BRANCH PREPARED_HEAD_OID \
+    PREPARED_BASE_OID PREPARED_REMOTE_OID HISTORY_REWRITTEN
 
-EXPECTED_REMOTE_OID is the verified pre-rewrite remote head, or - when the
-branch is verified to be unpublished.
+EXPECTED_REMOTE_OID is the verified pre-rewrite remote head, or - for a
+verified unpublished branch. PREPARED_REMOTE_OID uses UNPUBLISHED.
 EOF
   exit 2
 }
@@ -20,72 +22,171 @@ fail() {
   exit 1
 }
 
+require_boolean() {
+  case "$2" in
+    true|false) ;;
+    *) fail "$1 must be true or false" ;;
+  esac
+}
+
 require_oid() {
-  OID_NAME=$1
-  OID_VALUE=$2
-  if ! printf '%s\n' "$OID_VALUE" |
+  if ! printf '%s\n' "$2" |
     grep -Eq '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'; then
-    fail "$OID_NAME is not a full Git object ID"
+    fail "$1 is not a full Git object ID"
   fi
 }
 
 require_branch() {
-  BRANCH_NAME=$1
-  BRANCH_VALUE=$2
-  git check-ref-format --branch "$BRANCH_VALUE" >/dev/null 2>&1 ||
-    fail "$BRANCH_NAME is not a valid branch name"
+  git check-ref-format --branch "$2" >/dev/null 2>&1 ||
+    fail "$1 is not a valid branch name"
+}
+
+require_host() {
+  if ! printf '%s\n' "$1" |
+    grep -Eq '^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?))*$'; then
+    fail "EXPECTED_HOST is not a valid GitHub host"
+  fi
+}
+
+require_repo() {
+  if ! printf '%s\n' "$1" |
+    grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    fail "EXPECTED_REPO must be an owner/name repository"
+  fi
+  case "$1" in
+    ./*|../*|*/.|*/..) fail "EXPECTED_REPO contains an invalid component" ;;
+  esac
 }
 
 require_remote() {
+  REMOTE_VALUE=$1
+  if ! printf '%s\n' "$REMOTE_VALUE" |
+    grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
+    fail "invalid Git remote name: $REMOTE_VALUE"
+  fi
+  git check-ref-format "refs/remotes/$REMOTE_VALUE/check" >/dev/null 2>&1 ||
+    fail "invalid Git remote name: $REMOTE_VALUE"
+  REMOTE_FOUND=false
+  while IFS= read -r REMOTE_CANDIDATE; do
+    if [ "$REMOTE_CANDIDATE" = "$REMOTE_VALUE" ]; then
+      REMOTE_FOUND=true
+      break
+    fi
+  done < <(git remote)
+  [ "$REMOTE_FOUND" = "true" ] ||
+    fail "Git remote $REMOTE_VALUE is unavailable"
+}
+
+remote_url_identity() {
+  REMOTE_URL=$1
+  case "$REMOTE_URL" in
+    git@*:*/*)
+      REMOTE_HOST=${REMOTE_URL#git@}
+      REMOTE_HOST=${REMOTE_HOST%%:*}
+      REMOTE_PATH=${REMOTE_URL#*:}
+      ;;
+    ssh://*/*/*|http://*/*/*|https://*/*/*)
+      REMOTE_PATH=${REMOTE_URL#*://}
+      REMOTE_AUTHORITY=${REMOTE_PATH%%/*}
+      REMOTE_HOST=${REMOTE_AUTHORITY##*@}
+      REMOTE_HOST=${REMOTE_HOST%%:*}
+      REMOTE_PATH=${REMOTE_PATH#*/}
+      ;;
+    *) return 1 ;;
+  esac
+  REMOTE_PATH=${REMOTE_PATH#/}
+  REMOTE_PATH=${REMOTE_PATH%.git}
+  case "$REMOTE_PATH" in
+    */*/*|""|/*) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  REMOTE_HOST=$(printf '%s' "$REMOTE_HOST" |
+    tr '[:upper:]' '[:lower:]') || return 1
+  REMOTE_REPO=$(printf '%s' "$REMOTE_PATH" |
+    tr '[:upper:]' '[:lower:]') || return 1
+}
+
+remote_fetches_repo() {
   REMOTE_NAME=$1
-  git remote get-url "$REMOTE_NAME" >/dev/null 2>&1 ||
-    fail "Git remote $REMOTE_NAME is unavailable"
+  EXPECTED_HOST_LOWER=$2
+  EXPECTED_REPO_LOWER=$3
+  FETCH_URLS=$(git remote get-url --all "$REMOTE_NAME" 2>/dev/null) ||
+    return 1
+  FETCH_URL_COUNT=0
+  while IFS= read -r FETCH_URL; do
+    [ -n "$FETCH_URL" ] || continue
+    FETCH_URL_COUNT=$((FETCH_URL_COUNT + 1))
+    remote_url_identity "$FETCH_URL" || return 1
+    [ "$REMOTE_HOST" = "$EXPECTED_HOST_LOWER" ] &&
+      [ "$REMOTE_REPO" = "$EXPECTED_REPO_LOWER" ] || return 1
+  done <<EOF
+$FETCH_URLS
+EOF
+  [ "$FETCH_URL_COUNT" -gt 0 ]
+}
+
+remote_targets_repo() {
+  REMOTE_NAME=$1
+  EXPECTED_HOST_LOWER=$2
+  EXPECTED_REPO_LOWER=$3
+  remote_fetches_repo \
+    "$REMOTE_NAME" "$EXPECTED_HOST_LOWER" "$EXPECTED_REPO_LOWER" || return 1
+  PUSH_URLS=$(git remote get-url --push --all "$REMOTE_NAME" 2>/dev/null) ||
+    return 1
+  PUSH_URL_COUNT=0
+  while IFS= read -r PUSH_URL; do
+    [ -n "$PUSH_URL" ] || continue
+    PUSH_URL_COUNT=$((PUSH_URL_COUNT + 1))
+    remote_url_identity "$PUSH_URL" || return 1
+    [ "$REMOTE_HOST" = "$EXPECTED_HOST_LOWER" ] &&
+      [ "$REMOTE_REPO" = "$EXPECTED_REPO_LOWER" ] || return 1
+  done <<EOF
+$PUSH_URLS
+EOF
+  [ "$PUSH_URL_COUNT" -eq 1 ]
 }
 
 remote_head_oid() {
-  REMOTE_NAME=$1
-  BRANCH_NAME=$2
-  REMOTE_OUTPUT=$(git ls-remote --heads "$REMOTE_NAME" \
-    "refs/heads/$BRANCH_NAME") ||
-    fail "failed to inspect $REMOTE_NAME/$BRANCH_NAME"
-  REMOTE_LINE_COUNT=$(printf '%s\n' "$REMOTE_OUTPUT" | sed '/^$/d' | wc -l)
-  if [ "$REMOTE_LINE_COUNT" -gt 1 ]; then
-    fail "multiple remote refs matched $REMOTE_NAME/$BRANCH_NAME"
-  fi
-  if [ "$REMOTE_LINE_COUNT" -eq 0 ]; then
-    printf '\n'
-    return
-  fi
-  printf '%s\n' "$REMOTE_OUTPUT" | awk 'NR == 1 {print $1}'
+  REMOTE_OUTPUT=$(git ls-remote --heads "$1" "refs/heads/$2") ||
+    fail "failed to inspect $1/$2"
+  REMOTE_LINE_COUNT=0
+  REMOTE_OID=""
+  while IFS= read -r REMOTE_LINE; do
+    [ -n "$REMOTE_LINE" ] || continue
+    REMOTE_LINE_COUNT=$((REMOTE_LINE_COUNT + 1))
+    REMOTE_OID=${REMOTE_LINE%%[[:space:]]*}
+  done <<EOF
+$REMOTE_OUTPUT
+EOF
+  [ "$REMOTE_LINE_COUNT" -le 1 ] ||
+    fail "multiple remote refs matched $1/$2"
+  printf '%s\n' "$REMOTE_OID"
 }
 
-checkpoint_value() {
-  CHECKPOINT_PATH=$1
-  CHECKPOINT_KEY=$2
-  CHECKPOINT_MATCHES=$(sed -n "s/^${CHECKPOINT_KEY}=//p" "$CHECKPOINT_PATH")
-  CHECKPOINT_MATCH_COUNT=$(sed -n "/^${CHECKPOINT_KEY}=/p" \
-    "$CHECKPOINT_PATH" | wc -l)
-  if [ "$CHECKPOINT_MATCH_COUNT" -ne 1 ]; then
-    fail "checkpoint field $CHECKPOINT_KEY is missing or duplicated"
-  fi
-  printf '%s\n' "$CHECKPOINT_MATCHES"
+read_branch() {
+  BRANCH_RESULT=$(git branch --show-current) ||
+    fail "failed to inspect current branch"
+  printf '%s\n' "$BRANCH_RESULT"
+}
+
+read_status() {
+  STATUS_RESULT=$(git status --porcelain) ||
+    fail "failed to inspect worktree status"
+  printf '%s\n' "$STATUS_RESULT"
 }
 
 prepare() {
-  [ "$#" -eq 8 ] || usage
-  CHECKPOINT_PATH=$1
-  BASE_REMOTE=$2
-  DEFAULT_BRANCH=$3
-  PUSH_REMOTE=$4
-  CURRENT_BRANCH=$5
-  PUSH_BRANCH=$6
-  HISTORY_REWRITTEN_INPUT=$7
-  EXPECTED_REMOTE_OID=$8
+  [ "$#" -eq 7 ] || usage
+  BASE_REMOTE=$1
+  DEFAULT_BRANCH=$2
+  PUSH_REMOTE=$3
+  CURRENT_BRANCH=$4
+  PUSH_BRANCH=$5
+  HISTORY_REWRITTEN_INPUT=$6
+  EXPECTED_REMOTE_OID=$7
 
-  case "$HISTORY_REWRITTEN_INPUT" in
-    true|false) ;;
-    *) fail "HISTORY_REWRITTEN must be true or false" ;;
-  esac
+  require_boolean "HISTORY_REWRITTEN" "$HISTORY_REWRITTEN_INPUT"
   case "$EXPECTED_REMOTE_OID" in
     -) ;;
     *) require_oid "EXPECTED_REMOTE_OID" "$EXPECTED_REMOTE_OID" ;;
@@ -98,120 +199,101 @@ prepare() {
 
   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) ||
     fail "the current directory is not in a Git worktree"
-  cd "$REPO_ROOT" || exit 1
-  ACTUAL_BRANCH=$(git branch --show-current)
-  if [ "$ACTUAL_BRANCH" != "$CURRENT_BRANCH" ]; then
+  cd "$REPO_ROOT" || fail "failed to enter the Git worktree"
+  ACTUAL_BRANCH=$(read_branch) || exit 1
+  [ "$ACTUAL_BRANCH" = "$CURRENT_BRANCH" ] ||
     fail "expected branch $CURRENT_BRANCH, found $ACTUAL_BRANCH"
-  fi
-  if [ -n "$(git status --porcelain)" ]; then
-    fail "worktree must be clean before prepare"
-  fi
+  WORKTREE_STATUS=$(read_status) || exit 1
+  [ -z "$WORKTREE_STATUS" ] || fail "worktree must be clean before prepare"
 
   git fetch "$BASE_REMOTE" "$DEFAULT_BRANCH" ||
     fail "failed to refresh $BASE_REMOTE/$DEFAULT_BRANCH"
   BASE_REF="refs/remotes/$BASE_REMOTE/$DEFAULT_BRANCH"
   PREPARE_BEFORE_HEAD=$(git rev-parse HEAD) ||
     fail "failed to read HEAD before prepare"
-  git rebase "$BASE_REF" ||
+  git rebase "$BASE_REF" >&2 ||
     fail "rebase stopped; resolve and restart prepare, or abort"
   PREPARED_HEAD_OID=$(git rev-parse HEAD) ||
     fail "failed to read prepared HEAD"
   PREPARED_BASE_OID=$(git rev-parse "$BASE_REF^{commit}") ||
     fail "failed to read prepared base tip"
-  REMOTE_BASE_OID=$(remote_head_oid "$BASE_REMOTE" "$DEFAULT_BRANCH")
+  REMOTE_BASE_OID=$(remote_head_oid "$BASE_REMOTE" "$DEFAULT_BRANCH") ||
+    exit 1
   require_oid "remote base OID" "$REMOTE_BASE_OID"
-  if [ "$REMOTE_BASE_OID" != "$PREPARED_BASE_OID" ]; then
+  [ "$REMOTE_BASE_OID" = "$PREPARED_BASE_OID" ] ||
     fail "base changed while prepare was running"
-  fi
-  if [ "$(git rev-list --count "$PREPARED_BASE_OID"..HEAD)" -eq 0 ]; then
+  COMMITS_AHEAD=$(git rev-list --count "$PREPARED_BASE_OID"..HEAD) ||
+    fail "failed to count commits ahead of the prepared base"
+  case "$COMMITS_AHEAD" in
+    ""|*[!0-9]*) fail "commit count is not a non-negative integer" ;;
+  esac
+  [ "$COMMITS_AHEAD" -gt 0 ] ||
     fail "$CURRENT_BRANCH has no commits ahead of the prepared base"
-  fi
-  if [ -n "$(git status --porcelain)" ]; then
-    fail "worktree changed during prepare"
-  fi
+  WORKTREE_STATUS=$(read_status) || exit 1
+  [ -z "$WORKTREE_STATUS" ] || fail "worktree changed during prepare"
 
-  PREPARED_REMOTE_OID=$(remote_head_oid "$PUSH_REMOTE" "$PUSH_BRANCH")
+  PREPARED_REMOTE_OID=$(remote_head_oid "$PUSH_REMOTE" "$PUSH_BRANCH") ||
+    exit 1
   if [ "$EXPECTED_REMOTE_OID" = "-" ]; then
-    if [ -n "$PREPARED_REMOTE_OID" ]; then
+    [ -z "$PREPARED_REMOTE_OID" ] ||
       fail "remote branch exists but was expected to be unpublished"
-    fi
     PREPARED_REMOTE_VALUE="UNPUBLISHED"
   else
-    if [ "$PREPARED_REMOTE_OID" != "$EXPECTED_REMOTE_OID" ]; then
-      fail "remote head changed before prepare checkpoint"
-    fi
+    [ "$PREPARED_REMOTE_OID" = "$EXPECTED_REMOTE_OID" ] ||
+      fail "remote head changed before prepare result"
     PREPARED_REMOTE_VALUE=$PREPARED_REMOTE_OID
   fi
 
   HISTORY_REWRITTEN=$HISTORY_REWRITTEN_INPUT
   if [ "$PREPARE_BEFORE_HEAD" != "$PREPARED_HEAD_OID" ]; then
-    HISTORY_REWRITTEN="true"
-    if [ -n "$PREPARED_REMOTE_OID" ] &&
-      ! git merge-base --is-ancestor \
-        "$PREPARED_REMOTE_OID" "$PREPARE_BEFORE_HEAD"; then
-      fail "remote branch is not contained in the pre-prepare history"
+    HISTORY_REWRITTEN=true
+    if [ -n "$PREPARED_REMOTE_OID" ]; then
+      git merge-base --is-ancestor \
+        "$PREPARED_REMOTE_OID" "$PREPARE_BEFORE_HEAD"
+      ANCESTOR_STATUS=$?
+      case "$ANCESTOR_STATUS" in
+        0) ;;
+        1) fail "remote branch is not contained in pre-prepare history" ;;
+        *) fail "failed to inspect pre-prepare ancestry" ;;
+      esac
     fi
   fi
   if [ "$HISTORY_REWRITTEN" = "false" ] &&
-    [ -n "$PREPARED_REMOTE_OID" ] &&
-    ! git merge-base --is-ancestor \
-      "$PREPARED_REMOTE_OID" "$PREPARED_HEAD_OID"; then
-    fail "non-rewrite push would not be a fast-forward"
+    [ -n "$PREPARED_REMOTE_OID" ]; then
+    git merge-base --is-ancestor \
+      "$PREPARED_REMOTE_OID" "$PREPARED_HEAD_OID"
+    ANCESTOR_STATUS=$?
+    case "$ANCESTOR_STATUS" in
+      0) ;;
+      1) fail "non-rewrite push would not be a fast-forward" ;;
+      *) fail "failed to inspect prepared ancestry" ;;
+    esac
   fi
 
-  CHECKPOINT_PARENT=$(dirname "$CHECKPOINT_PATH")
-  [ -d "$CHECKPOINT_PARENT" ] ||
-    fail "checkpoint parent directory does not exist"
-  CHECKPOINT_TEMP="${CHECKPOINT_PATH}.tmp.$$"
-  umask 077
-  trap 'rm -f "$CHECKPOINT_TEMP"' EXIT HUP INT TERM
-  {
-    printf 'VERSION=1\n'
-    printf 'REPO_ROOT=%s\n' "$REPO_ROOT"
-    printf 'BASE_REMOTE=%s\n' "$BASE_REMOTE"
-    printf 'DEFAULT_BRANCH=%s\n' "$DEFAULT_BRANCH"
-    printf 'PUSH_REMOTE=%s\n' "$PUSH_REMOTE"
-    printf 'CURRENT_BRANCH=%s\n' "$CURRENT_BRANCH"
-    printf 'PUSH_BRANCH=%s\n' "$PUSH_BRANCH"
-    printf 'PREPARED_HEAD_OID=%s\n' "$PREPARED_HEAD_OID"
-    printf 'PREPARED_BASE_OID=%s\n' "$PREPARED_BASE_OID"
-    printf 'PREPARED_REMOTE_OID=%s\n' "$PREPARED_REMOTE_VALUE"
-    printf 'HISTORY_REWRITTEN=%s\n' "$HISTORY_REWRITTEN"
-  } >"$CHECKPOINT_TEMP" || fail "failed to write checkpoint"
-  chmod 0400 "$CHECKPOINT_TEMP" ||
-    fail "failed to make checkpoint read-only"
-  mv -f "$CHECKPOINT_TEMP" "$CHECKPOINT_PATH" ||
-    fail "failed to publish checkpoint"
-  trap - EXIT HUP INT TERM
-
-  printf 'Prepared HEAD: %s\n' "$PREPARED_HEAD_OID"
-  printf 'Prepared base: %s\n' "$PREPARED_BASE_OID"
-  printf 'Prepared remote: %s\n' "$PREPARED_REMOTE_VALUE"
-  printf 'History rewritten: %s\n' "$HISTORY_REWRITTEN"
+  printf '{"version":1,"prepared_head_oid":"%s",' "$PREPARED_HEAD_OID"
+  printf '"prepared_base_oid":"%s",' "$PREPARED_BASE_OID"
+  printf '"prepared_remote_oid":"%s",' "$PREPARED_REMOTE_VALUE"
+  printf '"history_rewritten":%s}\n' "$HISTORY_REWRITTEN"
 }
 
 push_prepared() {
-  [ "$#" -eq 1 ] || usage
-  CHECKPOINT_PATH=$1
-  [ -f "$CHECKPOINT_PATH" ] || fail "checkpoint is unavailable"
-  [ "$(wc -l <"$CHECKPOINT_PATH")" -eq 11 ] ||
-    fail "checkpoint has an unexpected shape"
+  [ "$#" -eq 11 ] || usage
+  EXPECTED_HOST=$1
+  EXPECTED_REPO=$2
+  BASE_REMOTE=$3
+  DEFAULT_BRANCH=$4
+  PUSH_REMOTE=$5
+  CURRENT_BRANCH=$6
+  PUSH_BRANCH=$7
+  PREPARED_HEAD_OID=$8
+  PREPARED_BASE_OID=$9
+  PREPARED_REMOTE_VALUE=${10}
+  HISTORY_REWRITTEN=${11}
 
-  VERSION=$(checkpoint_value "$CHECKPOINT_PATH" VERSION)
-  [ "$VERSION" = "1" ] || fail "unsupported checkpoint version"
-  REPO_ROOT=$(checkpoint_value "$CHECKPOINT_PATH" REPO_ROOT)
-  BASE_REMOTE=$(checkpoint_value "$CHECKPOINT_PATH" BASE_REMOTE)
-  DEFAULT_BRANCH=$(checkpoint_value "$CHECKPOINT_PATH" DEFAULT_BRANCH)
-  PUSH_REMOTE=$(checkpoint_value "$CHECKPOINT_PATH" PUSH_REMOTE)
-  CURRENT_BRANCH=$(checkpoint_value "$CHECKPOINT_PATH" CURRENT_BRANCH)
-  PUSH_BRANCH=$(checkpoint_value "$CHECKPOINT_PATH" PUSH_BRANCH)
-  PREPARED_HEAD_OID=$(checkpoint_value "$CHECKPOINT_PATH" PREPARED_HEAD_OID)
-  PREPARED_BASE_OID=$(checkpoint_value "$CHECKPOINT_PATH" PREPARED_BASE_OID)
-  PREPARED_REMOTE_VALUE=$(checkpoint_value \
-    "$CHECKPOINT_PATH" PREPARED_REMOTE_OID)
-  HISTORY_REWRITTEN=$(checkpoint_value \
-    "$CHECKPOINT_PATH" HISTORY_REWRITTEN)
-
+  require_host "$EXPECTED_HOST"
+  require_repo "$EXPECTED_REPO"
+  require_remote "$BASE_REMOTE"
+  require_remote "$PUSH_REMOTE"
   require_branch "DEFAULT_BRANCH" "$DEFAULT_BRANCH"
   require_branch "CURRENT_BRANCH" "$CURRENT_BRANCH"
   require_branch "PUSH_BRANCH" "$PUSH_BRANCH"
@@ -221,78 +303,82 @@ push_prepared() {
     UNPUBLISHED) ;;
     *) require_oid "PREPARED_REMOTE_OID" "$PREPARED_REMOTE_VALUE" ;;
   esac
-  case "$HISTORY_REWRITTEN" in
-    true|false) ;;
-    *) fail "checkpoint HISTORY_REWRITTEN is invalid" ;;
-  esac
-  require_remote "$BASE_REMOTE"
-  require_remote "$PUSH_REMOTE"
+  require_boolean "HISTORY_REWRITTEN" "$HISTORY_REWRITTEN"
 
-  ACTUAL_REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) ||
+  EXPECTED_HOST_LOWER=$(printf '%s' "$EXPECTED_HOST" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_HOST"
+  EXPECTED_REPO_LOWER=$(printf '%s' "$EXPECTED_REPO" |
+    tr '[:upper:]' '[:lower:]') ||
+    fail "failed to normalize EXPECTED_REPO"
+  remote_targets_repo \
+    "$PUSH_REMOTE" "$EXPECTED_HOST_LOWER" "$EXPECTED_REPO_LOWER" ||
+    fail "remote $PUSH_REMOTE does not target $EXPECTED_HOST/$EXPECTED_REPO"
+  if [ "$PUSH_BRANCH" = "$DEFAULT_BRANCH" ] &&
+    remote_fetches_repo \
+      "$BASE_REMOTE" "$EXPECTED_HOST_LOWER" "$EXPECTED_REPO_LOWER"; then
+    fail "refusing to push the protected base branch"
+  fi
+
+  git rev-parse --show-toplevel >/dev/null 2>&1 ||
     fail "the current directory is not in a Git worktree"
-  if [ "$ACTUAL_REPO_ROOT" != "$REPO_ROOT" ]; then
-    fail "checkpoint belongs to a different worktree"
-  fi
-  cd "$REPO_ROOT" || exit 1
-  ACTUAL_BRANCH=$(git branch --show-current)
-  if [ "$ACTUAL_BRANCH" != "$CURRENT_BRANCH" ]; then
+  ACTUAL_BRANCH=$(read_branch) || exit 1
+  [ "$ACTUAL_BRANCH" = "$CURRENT_BRANCH" ] ||
     fail "checked-out branch changed after prepare"
-  fi
   ACTUAL_HEAD_OID=$(git rev-parse HEAD) ||
     fail "failed to read local HEAD"
-  if [ "$ACTUAL_HEAD_OID" != "$PREPARED_HEAD_OID" ]; then
+  [ "$ACTUAL_HEAD_OID" = "$PREPARED_HEAD_OID" ] ||
     fail "local HEAD changed after prepare"
-  fi
-  if [ -n "$(git status --porcelain)" ]; then
-    fail "worktree changed after prepare"
-  fi
+  WORKTREE_STATUS=$(read_status) || exit 1
+  [ -z "$WORKTREE_STATUS" ] || fail "worktree changed after prepare"
 
   LOCAL_BASE_OID=$(git rev-parse \
     "refs/remotes/$BASE_REMOTE/$DEFAULT_BRANCH^{commit}") ||
     fail "prepared base ref is unavailable"
-  REMOTE_BASE_OID=$(remote_head_oid "$BASE_REMOTE" "$DEFAULT_BRANCH")
+  REMOTE_BASE_OID=$(remote_head_oid "$BASE_REMOTE" "$DEFAULT_BRANCH") ||
+    exit 1
   if [ "$LOCAL_BASE_OID" != "$PREPARED_BASE_OID" ] ||
     [ "$REMOTE_BASE_OID" != "$PREPARED_BASE_OID" ]; then
     fail "base tip changed after prepare"
   fi
-
-  ACTUAL_REMOTE_OID=$(remote_head_oid "$PUSH_REMOTE" "$PUSH_BRANCH")
+  ACTUAL_REMOTE_OID=$(remote_head_oid "$PUSH_REMOTE" "$PUSH_BRANCH") ||
+    exit 1
   if [ "$PREPARED_REMOTE_VALUE" = "UNPUBLISHED" ]; then
-    if [ -n "$ACTUAL_REMOTE_OID" ]; then
+    [ -z "$ACTUAL_REMOTE_OID" ] ||
       fail "remote head changed after prepare"
-    fi
-  elif [ "$ACTUAL_REMOTE_OID" != "$PREPARED_REMOTE_VALUE" ]; then
-    fail "remote head changed after prepare"
+  else
+    [ "$ACTUAL_REMOTE_OID" = "$PREPARED_REMOTE_VALUE" ] ||
+      fail "remote head changed after prepare"
   fi
 
   if [ "$PREPARED_REMOTE_VALUE" = "UNPUBLISHED" ]; then
-    if [ "$PUSH_BRANCH" = "$CURRENT_BRANCH" ]; then
-      git push --set-upstream "$PUSH_REMOTE" "$CURRENT_BRANCH" ||
-        fail "normal first push failed"
-    else
-      git push "$PUSH_REMOTE" "$CURRENT_BRANCH:$PUSH_BRANCH" ||
-        fail "normal first push failed"
-    fi
-    PUSH_MODE="normal"
+    git push "$PUSH_REMOTE" "$CURRENT_BRANCH:$PUSH_BRANCH" ||
+      fail "normal first push failed"
+    PUSH_MODE=normal
   elif [ "$HISTORY_REWRITTEN" = "true" ]; then
     git push \
       --force-with-lease="refs/heads/$PUSH_BRANCH:$PREPARED_REMOTE_VALUE" \
       "$PUSH_REMOTE" "$CURRENT_BRANCH:$PUSH_BRANCH" ||
       fail "leased rewritten push failed"
-    PUSH_MODE="leased"
+    PUSH_MODE=leased
   else
     git merge-base --is-ancestor \
-      "$PREPARED_REMOTE_VALUE" "$PREPARED_HEAD_OID" ||
-      fail "prepared normal push is not a fast-forward"
+      "$PREPARED_REMOTE_VALUE" "$PREPARED_HEAD_OID"
+    ANCESTOR_STATUS=$?
+    case "$ANCESTOR_STATUS" in
+      0) ;;
+      1) fail "prepared normal push is not a fast-forward" ;;
+      *) fail "failed to inspect push ancestry" ;;
+    esac
     git push "$PUSH_REMOTE" "$CURRENT_BRANCH:$PUSH_BRANCH" ||
       fail "normal push failed"
-    PUSH_MODE="normal"
+    PUSH_MODE=normal
   fi
 
-  PUSHED_REMOTE_OID=$(remote_head_oid "$PUSH_REMOTE" "$PUSH_BRANCH")
-  if [ "$PUSHED_REMOTE_OID" != "$PREPARED_HEAD_OID" ]; then
+  PUSHED_REMOTE_OID=$(remote_head_oid "$PUSH_REMOTE" "$PUSH_BRANCH") ||
+    exit 1
+  [ "$PUSHED_REMOTE_OID" = "$PREPARED_HEAD_OID" ] ||
     fail "remote head does not equal prepared HEAD after push"
-  fi
   printf 'Push mode: %s\n' "$PUSH_MODE"
   printf 'Pushed HEAD: %s\n' "$PREPARED_HEAD_OID"
 }

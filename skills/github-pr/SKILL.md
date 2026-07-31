@@ -5,27 +5,17 @@ description: Use when creating or updating a GitHub pull request from committed 
 
 # GitHub Pull Request
 
-## Overview
-
-Derive repository, host, default branch, remotes, role, and pull-request head
-before writing. Keep commit policy in the repository and use the shared GitHub
-references for all branch, permission, rebase, and push mechanics.
-
 ## Establish context and choose a route
 
-Read and run [GitHub workflow setup](../../lib/github/setup.md) first. Preserve
-its shell context, including `GITHUB_HOST`, `DEFAULT_BRANCH`, `BASE_REF`,
-`PR_REPO`, `PR_HEAD_PREFIX`, `PUSH_REMOTE`, and `ROLE`. Use the discovered host
-for every GitHub CLI command:
+Read and run [GitHub workflow setup](../../lib/github/setup.md); preserve its
+context and use the discovered host for every GitHub CLI command:
 
 ```bash
 export GH_HOST="$GITHUB_HOST"
 ```
 
-Resolve the shared [PR context
-helper](../../lib/github/scripts/pr-context.sh) relative to this file and store
-its absolute path in `PR_CONTEXT_HELPER`. Pass it to [pull-request
-lookup](../../lib/github/lookup-pr.md):
+Resolve [PR context](../../lib/github/scripts/pr-context.sh) from this loaded
+skill, never `REPO_ROOT`/CWD, then pass it to [lookup](../../lib/github/lookup-pr.md):
 
 ```bash
 if [ -n "${PR_NUMBER:-}" ]; then
@@ -37,9 +27,7 @@ fi
 PR_LOOKUP_HELPER="$PR_CONTEXT_HELPER"
 ```
 
-Read and run the lookup reference now. It uses host-pinned REST for exact
-fork-owner/head filtering and returns a deterministic route. Its canonical
-query is:
+Run lookup's host-pinned, exact fork-owner/head query:
 
 ```text
 gh api --hostname "$GITHUB_HOST" --method GET \
@@ -58,8 +46,7 @@ case "$PR_ROUTE" in
 esac
 ```
 
-An existing pull request always yields `update`, never `create` or an early
-successful exit.
+An existing pull request always yields `update`, never an early successful exit.
 
 ## Verify an existing PR and its writable head
 
@@ -90,24 +77,43 @@ same-named local branch or push directly to an unverified fork. That reference
 sets `WORK_BRANCH`, `PR_HEAD_BRANCH`, and `MAINTAINER_CHECKOUT_VERIFIED` for the
 shared push workflow.
 
-Read [prepare, validate, and
-push](../../lib/github/commit-and-push.md) now and run its target-selection
-section before any repository-local commit operation that could amend, squash,
-or rebase published history. Preserve `EXPECTED_REMOTE_OID` and set
-`HISTORY_REWRITTEN=false`; change it to `true` if later commit work rewrites
-the PR history, but never replace the captured remote OID.
-
-## Prepare the branch and commit intentionally
+## Select and verify the working branch
 
 For the update route, do not enter this section until `guard-branch` has
 succeeded. There is no shared dirty-worktree or commit step before that
 route-specific branch-and-repository identity gate.
 
-Inspect `git status --porcelain` and `git rev-list --count "$BASE_REF"..HEAD`.
+```bash
+WORKTREE_STATUS=$(git status --porcelain) || {
+  echo "Error: failed to inspect worktree status" >&2
+  exit 1
+}
+COMMITS_AHEAD=$(git rev-list --count "$BASE_REF"..HEAD) || {
+  echo "Error: failed to inspect commits ahead of base" >&2
+  exit 1
+}
+```
+
+Rerun this exact block after commit. Never put either substitution inside `test` or `[ ]`; that hides the Git command's failure status.
+
 For the create route, if `CURRENT_BRANCH` equals `DEFAULT_BRANCH`, or has no
 commits ahead but has uncommitted work, obtain a user-approved
 `BRANCH_SUMMARY` and any repository-required `BRANCH_PREFIX`; then read and run
-[branch naming](../../lib/github/branch-naming.md). Never invent a prefix.
+[branch naming](../../lib/github/branch-naming.md). Never invent a prefix. Only
+after its checkout succeeds, set `PR_HEAD_BRANCH="$CURRENT_BRANCH"` and
+`HEAD_REPO="$LOCAL_REPO"`.
+
+## Capture push authority before commit work
+
+Read [prepare, validate, and push](../../lib/github/commit-and-push.md) and resolve its helper from that reference, never `REPO_ROOT`/CWD.
+For `create`, this is after branch naming/checkout; for `update`, it is after
+the verified head checkout above. Run its authority-capture section before any
+commit operation that could rewrite history. Keep the verified
+host/repository/remote/branch and `EXPECTED_REMOTE_OID` in the parent shell,
+never a file. Set `HISTORY_REWRITTEN=false`, changing only the boolean to
+`true` after a later rewrite.
+
+## Commit intentionally
 
 If uncommitted changes remain, use the repository-local `git-commit` skill.
 Let that skill apply the repository's review, tests, message syntax, and commit
@@ -115,20 +121,19 @@ shape. If it is unavailable, stop and ask the user how this repository commits;
 do not substitute a conventional-commit prefix or a generic checklist.
 
 After committing, require a clean worktree and at least one commit in
-`"$BASE_REF"..HEAD`. State the intended base and push target. Run the shared
-reference's `prepare` phase now. It refreshes `DEFAULT_BRANCH`, performs the
-final rebase, and checkpoints the exact prepared head, base tip, remote head,
-and preserved rewrite state.
+`"$BASE_REF"..HEAD`. Run shared `prepare`; it refreshes/rebases on the base and
+returns structured head/base/remote OIDs and rewrite state. Parse them
+immediately into parent-shell variables and never serialize them to disk.
 
 Run the repository-defined focused and required broader validation against
 exactly `PREPARED_HEAD_OID`. Validation must not commit, amend, rebase, switch
-branches, or fetch into the prepared base ref. If it changes `HEAD`, prepare
-and validate again.
+branches, fetch into the prepared base ref, or be sourced into this
+authority-holding shell. If it changes `HEAD`, prepare and validate again.
 
-Immediately after successful validation, run the shared reference's
-non-mutating `push` phase. It refuses local-head, base-tip, or remote-head drift
-and uses an explicit `--force-with-lease` when history was rewritten. On a
-prepare conflict, resolve and restart prepare under repository policy, or use
+Pass all preserved authority and prepared values explicitly to shared
+non-mutating `push`. It reloads nothing from disk, revalidates the remote URLs,
+refuses head/base/remote drift, and uses explicit `--force-with-lease` after a
+rewrite. Resolve a prepare conflict and rerun under repository policy, or use
 `git rebase --abort`; never discard work with a destructive reset.
 
 ## Create or update the pull request
@@ -193,22 +198,3 @@ GH_HOST="$GITHUB_HOST" gh pr view "${PR_NUMBER:-$PR_URL}" \
   --repo "$PR_REPO" \
   --json number,url,state,isDraft,baseRefName,headRefName
 ```
-
-## Quick reference
-
-| Condition | Action |
-| --- | --- |
-| Dirty worktree | Delegate to the repository-local `git-commit` skill |
-| Default or undiverged branch with work | Apply shared branch naming policy |
-| Maintainer editing a fork | Verify permission and use the shared fork checkout |
-| Rebase rewrites published history | Use only explicit `--force-with-lease` |
-
-## Common mistakes
-
-- Assuming `main`, `origin`, a public GitHub host, or the current repository is the PR base.
-- Using unsupported `gh pr list --head OWNER:BRANCH` instead of shared REST lookup.
-- Exiting when a PR already exists instead of updating its branch and metadata.
-- Committing before an author/fork PR head branch and repository are both
-  verified against the local checkout.
-- Applying maintainer edits without verified head-repository push permission.
-- Inventing commit prefixes, PR checklists, titles, or body content.
