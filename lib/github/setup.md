@@ -36,16 +36,25 @@ repository that receives pull requests: the parent for a fork, otherwise the
 local repository.
 
 ```bash
-LOCAL_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner') || {
+LOCAL_REPO_DATA=$(gh repo view --json nameWithOwner,url) || {
   echo "Error: GitHub repository identity could not be resolved" >&2
   exit 1
 }
+LOCAL_REPO=$(printf '%s' "$LOCAL_REPO_DATA" | jq -r '.nameWithOwner')
+LOCAL_REPO_URL=$(printf '%s' "$LOCAL_REPO_DATA" | jq -r '.url')
 if [ -z "$LOCAL_REPO" ] || [ "$LOCAL_REPO" = "null" ]; then
   echo "Error: GitHub repository identity is empty" >&2
   exit 1
 fi
+GITHUB_HOST=${LOCAL_REPO_URL#*://}
+GITHUB_HOST=${GITHUB_HOST%%/*}
+GITHUB_HOST=${GITHUB_HOST%%:*}
+if [ -z "$GITHUB_HOST" ] || [ "$GITHUB_HOST" = "$LOCAL_REPO_URL" ]; then
+  echo "Error: GitHub host could not be resolved from $LOCAL_REPO_URL" >&2
+  exit 1
+fi
 
-REPO_DATA=$(gh api "repos/$LOCAL_REPO") || {
+REPO_DATA=$(gh api --hostname "$GITHUB_HOST" "repos/$LOCAL_REPO") || {
   echo "Error: GitHub metadata could not be read for $LOCAL_REPO" >&2
   exit 1
 }
@@ -61,7 +70,8 @@ if [ -z "$PR_REPO" ] || [ "$PR_REPO" = "null" ]; then
   exit 1
 fi
 
-DEFAULT_BRANCH=$(gh api "repos/$PR_REPO" --jq '.default_branch') || {
+DEFAULT_BRANCH=$(gh api --hostname "$GITHUB_HOST" "repos/$PR_REPO" \
+  --jq '.default_branch') || {
   echo "Error: default branch could not be resolved for $PR_REPO" >&2
   exit 1
 }
@@ -73,22 +83,31 @@ fi
 
 ## 3. Match remotes by repository identity
 
-Remote names are local choices. Match their URLs to GitHub `owner/name`
-identities instead of assuming conventional names.
+Remote names are local choices. Every fetch URL and the single effective push
+URL must match the discovered GitHub host and expected `owner/name`. Reject
+split push destinations rather than choosing one.
 
 ```bash
-remote_repo() {
-  REMOTE_URL=$(git remote get-url "$1" 2>/dev/null) || return 1
+remote_url_identity() {
+  REMOTE_URL=$1
   case "$REMOTE_URL" in
     git@*:*/*)
+      REMOTE_HOST=${REMOTE_URL#git@}
+      REMOTE_HOST=${REMOTE_HOST%%:*}
       REMOTE_PATH=${REMOTE_URL#*:}
       ;;
     ssh://*/*/*)
       REMOTE_PATH=${REMOTE_URL#ssh://}
+      REMOTE_AUTHORITY=${REMOTE_PATH%%/*}
+      REMOTE_HOST=${REMOTE_AUTHORITY##*@}
+      REMOTE_HOST=${REMOTE_HOST%%:*}
       REMOTE_PATH=${REMOTE_PATH#*/}
       ;;
     http://*/*/*|https://*/*/*)
       REMOTE_PATH=${REMOTE_URL#*://}
+      REMOTE_AUTHORITY=${REMOTE_PATH%%/*}
+      REMOTE_HOST=${REMOTE_AUTHORITY##*@}
+      REMOTE_HOST=${REMOTE_HOST%%:*}
       REMOTE_PATH=${REMOTE_PATH#*/}
       ;;
     *)
@@ -98,29 +117,69 @@ remote_repo() {
   REMOTE_PATH=${REMOTE_PATH#/}
   REMOTE_PATH=${REMOTE_PATH%.git}
   case "$REMOTE_PATH" in
-    */*) printf '%s\n' "$REMOTE_PATH" ;;
+    */*/*|""|/*) return 1 ;;
+    */*) ;;
     *) return 1 ;;
   esac
+  REMOTE_HOST=$(printf '%s' "$REMOTE_HOST" | tr '[:upper:]' '[:lower:]')
+  REMOTE_REPO=$(printf '%s' "$REMOTE_PATH" | tr '[:upper:]' '[:lower:]')
+}
+
+remote_targets_repo() {
+  REMOTE_NAME=$1
+  EXPECTED_REPO=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+  FETCH_URLS=$(git remote get-url --all "$REMOTE_NAME" 2>/dev/null) ||
+    return 1
+  [ -n "$FETCH_URLS" ] || return 1
+
+  while IFS= read -r FETCH_URL; do
+    remote_url_identity "$FETCH_URL" || return 1
+    if [ "$REMOTE_HOST" != "$GITHUB_HOST" ] ||
+       [ "$REMOTE_REPO" != "$EXPECTED_REPO" ]; then
+      return 1
+    fi
+  done <<EOF
+$FETCH_URLS
+EOF
+
+  PUSH_URLS=$(git remote get-url --push --all "$REMOTE_NAME" 2>/dev/null) ||
+    return 1
+  PUSH_URL_COUNT=$(printf '%s\n' "$PUSH_URLS" | sed '/^$/d' | wc -l)
+  while IFS= read -r PUSH_URL; do
+    remote_url_identity "$PUSH_URL" || return 1
+    if [ "$REMOTE_HOST" != "$GITHUB_HOST" ] ||
+       [ "$REMOTE_REPO" != "$EXPECTED_REPO" ]; then
+      echo "Error: remote $REMOTE_NAME has a mismatched push destination" >&2
+      return 1
+    fi
+  done <<EOF
+$PUSH_URLS
+EOF
+  if [ "$PUSH_URL_COUNT" -ne 1 ]; then
+    echo "Error: remote $REMOTE_NAME must have exactly one push destination" >&2
+    return 1
+  fi
 }
 
 BASE_REMOTE=""
 PUSH_REMOTE=""
 while IFS= read -r REMOTE_NAME; do
-  REMOTE_REPO=$(remote_repo "$REMOTE_NAME") || continue
-  if [ "$REMOTE_REPO" = "$PR_REPO" ] && [ -z "$BASE_REMOTE" ]; then
+  if remote_targets_repo "$REMOTE_NAME" "$PR_REPO" &&
+     [ -z "$BASE_REMOTE" ]; then
     BASE_REMOTE="$REMOTE_NAME"
   fi
-  if [ "$REMOTE_REPO" = "$LOCAL_REPO" ] && [ -z "$PUSH_REMOTE" ]; then
+  if remote_targets_repo "$REMOTE_NAME" "$LOCAL_REPO" &&
+     [ -z "$PUSH_REMOTE" ]; then
     PUSH_REMOTE="$REMOTE_NAME"
   fi
 done < <(git remote)
 
 if [ -z "$BASE_REMOTE" ]; then
-  echo "Error: no Git remote points to base repository $PR_REPO" >&2
+  echo "Error: no remote safely targets $GITHUB_HOST/$PR_REPO" >&2
   exit 1
 fi
 if [ -z "$PUSH_REMOTE" ]; then
-  echo "Error: no Git remote points to writable repository $LOCAL_REPO" >&2
+  echo "Error: no remote safely targets $GITHUB_HOST/$LOCAL_REPO" >&2
   exit 1
 fi
 
@@ -170,3 +229,7 @@ fi
 | `PR_REPO` | `owner/name` repository receiving the pull request |
 | `PR_HEAD_PREFIX` | Fork-owner prefix for pull-request head lookup, or empty |
 | `ROLE` | `owner` or `fork`; permission detection can set `maintainer` |
+
+The same shell also retains `GITHUB_HOST`, `LOCAL_REPO`, and
+`remote_targets_repo` so later references can revalidate a write target
+immediately before pushing.

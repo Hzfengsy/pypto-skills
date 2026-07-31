@@ -43,6 +43,80 @@ GITHUB_CONTEXT_VARIABLES = (
     "ROLE",
 )
 
+REFERENCE_INPUTS = {
+    "setup.md": frozenset(),
+    "lookup-pr.md": frozenset(
+        {
+            "CURRENT_BRANCH",
+            "PR_HEAD_BRANCH",
+            "PR_HEAD_PREFIX",
+            "PR_NUMBER",
+            "PR_REPO",
+        }
+    ),
+    "branch-naming.md": frozenset(
+        {"BRANCH_PREFIX", "BRANCH_SUMMARY", "CURRENT_BRANCH", "DEFAULT_BRANCH"}
+    ),
+    "commit-and-push.md": frozenset(
+        {
+            "BASE_REMOTE",
+            "CURRENT_BRANCH",
+            "DEFAULT_BRANCH",
+            "HEAD_REPO",
+            "LOCAL_REPO",
+            "MAINTAINER_CHECKOUT_VERIFIED",
+            "PR_HEAD_BRANCH",
+            "PUSH_REMOTE",
+            "REPO_ROOT",
+            "ROLE",
+            "WORK_BRANCH",
+        }
+    ),
+    "common-issues.md": frozenset(
+        {"PR_NUMBER", "PR_REPO", "REPOSITORY_NODE_ID"}
+    ),
+    "detect-permission.md": frozenset({"PR_NUMBER", "PR_REPO"}),
+    "fetch-comments.md": frozenset(
+        {
+            "COMMENTS_CURSOR",
+            "PR_NUMBER",
+            "PR_REPO",
+            "REVIEWS_CURSOR",
+            "THREADS_CURSOR",
+        }
+    ),
+    "reply-and-resolve.md": frozenset(
+        {
+            "COMMENT_DATABASE_ID",
+            "HANDLED_LEDGER",
+            "HANDLED_NODE_IDS",
+            "PR_NUMBER",
+            "PR_REPO",
+            "REPLY_BODY",
+            "THREAD_ID",
+        }
+    ),
+    "checkout-fork-branch.md": frozenset(
+        {"HEAD_REPO", "PR_HEAD_BRANCH", "PR_NUMBER", "PUSH_REMOTE", "ROLE"}
+    ),
+}
+
+BASH_BLOCK_RE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
+SHELL_VARIABLE_USE_RE = re.compile(
+    r"\$(?:{!?([A-Z][A-Z0-9_]*)|([A-Z][A-Z0-9_]*))"
+)
+SHELL_ASSIGNMENT_RE = re.compile(
+    r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE
+)
+SHELL_FOR_VARIABLE_RE = re.compile(
+    r"^\s*for\s+([A-Z][A-Z0-9_]*)\s+in\b", re.MULTILINE
+)
+SHELL_WHILE_READ_VARIABLE_RE = re.compile(
+    r"^\s*while\b[^\n]*\bread(?:\s+-[A-Za-z]+)*\s+"
+    r"([A-Z][A-Z0-9_]*)\s*;",
+    re.MULTILINE,
+)
+
 
 def deployable_files() -> list[Path]:
     return sorted(
@@ -52,6 +126,34 @@ def deployable_files() -> list[Path]:
         for path in root.rglob("*")
         if path.is_file()
     )
+
+
+def bash_source(path: Path) -> str:
+    return "\n".join(BASH_BLOCK_RE.findall(path.read_text(encoding="utf-8")))
+
+
+def shell_inputs(path: Path) -> set[str]:
+    source = bash_source(path)
+    definitions: dict[str, list[int]] = {}
+
+    for pattern in (
+        SHELL_ASSIGNMENT_RE,
+        SHELL_FOR_VARIABLE_RE,
+        SHELL_WHILE_READ_VARIABLE_RE,
+    ):
+        for match in pattern.finditer(source):
+            line_end = source.find("\n", match.end())
+            definition_position = len(source) if line_end < 0 else line_end
+            definitions.setdefault(match.group(1), []).append(definition_position)
+
+    inputs = set()
+    for match in SHELL_VARIABLE_USE_RE.finditer(source):
+        variable = match.group(1) or match.group(2)
+        if not any(
+            position < match.start() for position in definitions.get(variable, [])
+        ):
+            inputs.add(variable)
+    return inputs
 
 
 class PortabilityTests(unittest.TestCase):
@@ -67,7 +169,7 @@ class PortabilityTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(path.is_file(), f"missing required reference: {path}")
 
-    def test_setup_defines_context_before_references_use_it(self) -> None:
+    def test_setup_defines_context_contract(self) -> None:
         setup = ROOT / "lib/github/setup.md"
         self.assertTrue(setup.is_file(), f"missing required reference: {setup}")
         setup_text = setup.read_text(encoding="utf-8")
@@ -81,16 +183,50 @@ class PortabilityTests(unittest.TestCase):
             with self.subTest(variable=variable):
                 self.assertIn(variable, definitions)
 
-        for path in REQUIRED_GITHUB_REFERENCES[1:]:
+    def test_references_consume_only_explicit_inputs_before_definition(
+        self,
+    ) -> None:
+        self.assertEqual(
+            {path.name for path in REQUIRED_GITHUB_REFERENCES},
+            set(REFERENCE_INPUTS),
+        )
+        for path in REQUIRED_GITHUB_REFERENCES:
             with self.subTest(path=path):
-                self.assertTrue(path.is_file(), f"missing required reference: {path}")
-                used_context = set(
-                    re.findall(
-                        r"\$(?:{)?([A-Z][A-Z0-9_]*)(?:})?",
-                        path.read_text(encoding="utf-8"),
-                    )
-                ).intersection(GITHUB_CONTEXT_VARIABLES)
-                self.assertLessEqual(used_context, definitions)
+                self.assertEqual(REFERENCE_INPUTS[path.name], shell_inputs(path))
+
+    def test_remote_validation_covers_fetch_and_push_destinations(self) -> None:
+        setup = bash_source(ROOT / "lib/github/setup.md")
+        self.assertIn("GITHUB_HOST=", setup)
+        self.assertIn("git remote get-url --all", setup)
+        self.assertIn("git remote get-url --push --all", setup)
+        self.assertIn("PUSH_URL_COUNT", setup)
+        self.assertRegex(
+            setup,
+            r'\[ "\$REMOTE_HOST" != "\$GITHUB_HOST" \]',
+        )
+
+    def test_push_branch_requires_verified_role_context(self) -> None:
+        reference = bash_source(ROOT / "lib/github/commit-and-push.md")
+        self.assertIn('owner|fork)', reference)
+        self.assertIn(
+            '[ "$PR_HEAD_BRANCH" != "$CURRENT_BRANCH" ]',
+            reference,
+        )
+        self.assertIn("MAINTAINER_CHECKOUT_VERIFIED", reference)
+        self.assertIn(
+            'remote_targets_repo "$PUSH_REMOTE" "$EXPECTED_PUSH_REPO"',
+            reference,
+        )
+
+    def test_author_workflow_requires_head_repository_push_permission(
+        self,
+    ) -> None:
+        reference = bash_source(ROOT / "lib/github/detect-permission.md")
+        self.assertIn(
+            'HEAD_CAN_PUSH=$(gh api "repos/$HEAD_REPO"',
+            reference,
+        )
+        self.assertIn('[ "$HEAD_CAN_PUSH" != "true" ]', reference)
 
     def test_rewritten_pushes_use_force_with_lease(self) -> None:
         reference = ROOT / "lib/github/commit-and-push.md"

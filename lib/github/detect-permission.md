@@ -41,8 +41,16 @@ BASE_CAN_PUSH=$(gh api "repos/$PR_REPO" --jq '.permissions.push // false') || {
   echo "Error: base-repository permission could not be checked" >&2
   exit 1
 }
+HEAD_CAN_PUSH=$(gh api "repos/$HEAD_REPO" --jq '.permissions.push // false') || {
+  echo "Error: head-repository permission could not be checked" >&2
+  exit 1
+}
 
 if [ "$PR_AUTHOR" = "$CURRENT_USER" ]; then
+  if [ "$HEAD_CAN_PUSH" != "true" ]; then
+    echo "Error: current user cannot push to PR head repository $HEAD_REPO" >&2
+    exit 1
+  fi
   if [ "$HEAD_REPO" = "$PR_REPO" ]; then
     ROLE="owner"
   else
@@ -63,14 +71,13 @@ fi
 
 ## 3. Select the head-repository remote
 
-The `remote_repo` helper comes from setup. Do not silently add a remote because
-its URL and credentials are a repository-level choice.
+The `remote_targets_repo` helper comes from setup. Do not silently add a remote
+because its URL and credentials are a repository-level choice.
 
 ```bash
 PR_HEAD_REMOTE=""
 while IFS= read -r REMOTE_NAME; do
-  REMOTE_REPO=$(remote_repo "$REMOTE_NAME") || continue
-  if [ "$REMOTE_REPO" = "$HEAD_REPO" ]; then
+  if remote_targets_repo "$REMOTE_NAME" "$HEAD_REPO"; then
     PR_HEAD_REMOTE="$REMOTE_NAME"
     break
   fi
@@ -94,7 +101,7 @@ PUSH_REMOTE="$PR_HEAD_REMOTE"
 - `ROLE`: `owner`, `fork`, or `maintainer`
 - `PR_STATE`, `PR_HEAD_BRANCH`, `PR_AUTHOR`
 - `HEAD_REPO` and the matching `PUSH_REMOTE`
-- `MAINTAINER_CAN_MODIFY`
+- `MAINTAINER_CAN_MODIFY`, `HEAD_CAN_PUSH`
 
 Do not remove the selected remote after pushing; its tracking relationship is
 needed for later pull-request lookup.

@@ -70,9 +70,44 @@ For a normal owner or fork branch, `PR_HEAD_BRANCH` is either unset or equals
 the original pull-request head branch.
 
 ```bash
-PUSH_BRANCH=${PR_HEAD_BRANCH:-$CURRENT_BRANCH}
-if [ -z "$PUSH_BRANCH" ]; then
-  echo "Error: push branch could not be resolved" >&2
+case "$ROLE" in
+  owner|fork)
+    EXPECTED_PUSH_REPO="$LOCAL_REPO"
+    if [ -n "${PR_HEAD_BRANCH:-}" ]; then
+      if [ "$PR_HEAD_BRANCH" != "$CURRENT_BRANCH" ]; then
+        echo "Error: $ROLE workflow cannot redirect $CURRENT_BRANCH to $PR_HEAD_BRANCH" >&2
+        exit 1
+      fi
+      if [ -z "${HEAD_REPO:-}" ] || [ "$HEAD_REPO" != "$LOCAL_REPO" ]; then
+        echo "Error: PR head repository does not match local writable repository" >&2
+        exit 1
+      fi
+    fi
+    PUSH_BRANCH="$CURRENT_BRANCH"
+    ;;
+  maintainer)
+    if [ -z "${PR_HEAD_BRANCH:-}" ] || [ -z "${HEAD_REPO:-}" ]; then
+      echo "Error: maintainer push requires verified PR head context" >&2
+      exit 1
+    fi
+    EXPECTED_PUSH_REPO="$HEAD_REPO"
+    PUSH_BRANCH="$PR_HEAD_BRANCH"
+    if [ "$PR_HEAD_BRANCH" != "$CURRENT_BRANCH" ]; then
+      if [ "${MAINTAINER_CHECKOUT_VERIFIED:-}" != "true" ] ||
+         [ "${WORK_BRANCH:-}" != "$CURRENT_BRANCH" ]; then
+        echo "Error: differing maintainer push requires verified checkout context" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  *)
+    echo "Error: unsupported repository role: $ROLE" >&2
+    exit 1
+    ;;
+esac
+
+if ! remote_targets_repo "$PUSH_REMOTE" "$EXPECTED_PUSH_REPO"; then
+  echo "Error: push remote no longer safely targets $EXPECTED_PUSH_REPO" >&2
   exit 1
 fi
 
