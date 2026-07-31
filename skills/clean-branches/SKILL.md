@@ -89,8 +89,10 @@ For each approved local pair, pass the preserved OID:
   "$BRANCH_NAME" "$APPROVED_OID" "$DEFAULT_BRANCH"
 ```
 
-The helper re-reads the local ref immediately before `git branch -D` and
-refuses deletion if the OID, current branch, or default branch changed.
+The helper validates the full `refs/heads/...` ref, protects branches checked
+out in any worktree, then atomically deletes only when the ref still equals the
+approved OID. It removes branch-specific config only after successful ref
+deletion.
 
 For each approved remote pair, first revalidate that the push remote still
 targets the fork, then pass the preserved OID:

@@ -17,9 +17,13 @@ EOF
   exit 2
 }
 
-require_branch() {
-  git check-ref-format --branch "$1" >/dev/null 2>&1 ||
-    fail "invalid branch name: $1"
+branch_ref_for() {
+  short_branch=$1
+  full_branch_ref="refs/heads/$short_branch"
+  git check-ref-format --branch "$short_branch" >/dev/null 2>&1 &&
+    git check-ref-format "$full_branch_ref" >/dev/null 2>&1 ||
+    fail "invalid branch name: $short_branch"
+  printf '%s\n' "$full_branch_ref"
 }
 
 require_expected_oid() {
@@ -36,7 +40,8 @@ require_expected_oid() {
 
 protect_branch() {
   branch=$1
-  default_branch=$2
+  branch_ref=$2
+  default_branch=$3
   current_branch=$(git branch --show-current)
   [ -n "$current_branch" ] ||
     fail "detached HEAD is unsupported"
@@ -44,6 +49,10 @@ protect_branch() {
     fail "refusing to delete current branch: $branch"
   [ "$branch" != "$default_branch" ] ||
     fail "refusing to delete default branch: $branch"
+  if git worktree list --porcelain |
+    grep -Fqx "branch $branch_ref"; then
+    fail "refusing to delete branch checked out in a linked worktree: $branch"
+  fi
 }
 
 classify() {
@@ -54,7 +63,7 @@ classify() {
   default_branch=$4
   shift 4
 
-  require_branch "$branch"
+  branch_ref=$(branch_ref_for "$branch")
   current_branch=$(git branch --show-current)
   [ -n "$current_branch" ] ||
     fail "detached HEAD is unsupported"
@@ -91,17 +100,18 @@ delete_local() {
   approved_oid=$2
   default_branch=$3
 
-  require_branch "$branch"
+  branch_ref=$(branch_ref_for "$branch")
   require_expected_oid "$approved_oid"
-  protect_branch "$branch" "$default_branch"
+  protect_branch "$branch" "$branch_ref" "$default_branch"
 
-  branch_ref="refs/heads/$branch"
   actual_oid=$(git rev-parse --verify "$branch_ref^{commit}" 2>/dev/null) ||
     fail "approved local branch no longer exists: $branch"
   [ "$actual_oid" = "$approved_oid" ] ||
     fail "local branch changed since approval: $branch"
 
-  git branch -D -- "$branch"
+  git update-ref -d "$branch_ref" "$approved_oid" ||
+    fail "local branch changed during atomic deletion: $branch"
+  git config --remove-section "branch.$branch" 2>/dev/null || :
 }
 
 delete_remote() {
@@ -112,15 +122,14 @@ delete_remote() {
   push_remote=$4
   base_remote=$5
 
-  require_branch "$branch"
+  branch_ref=$(branch_ref_for "$branch")
   require_expected_oid "$approved_oid"
-  protect_branch "$branch" "$default_branch"
+  protect_branch "$branch" "$branch_ref" "$default_branch"
   [ "$push_remote" != "$base_remote" ] ||
     fail "refusing to delete from base remote: $base_remote"
   git remote get-url "$push_remote" >/dev/null 2>&1 ||
     fail "push remote is unavailable: $push_remote"
 
-  branch_ref="refs/heads/$branch"
   remote_line=$(
     git ls-remote --exit-code --refs "$push_remote" "$branch_ref"
   ) || fail "approved remote branch no longer exists: $push_remote/$branch"

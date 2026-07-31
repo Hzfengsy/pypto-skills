@@ -92,6 +92,8 @@ class CleanBranchesBehaviorTests(unittest.TestCase):
 
         for branch in (
             "base-only",
+            "linked-worktree",
+            "local-atomic",
             "local-safe",
             "local-race",
             "remote-safe",
@@ -264,6 +266,7 @@ class CleanBranchesBehaviorTests(unittest.TestCase):
 
     def test_local_delete_removes_exact_approved_tip(self) -> None:
         approved_oid = self.rev_parse("local-safe")
+        self.git("config", "branch.local-safe.test-marker", "keep-until-delete")
 
         self.helper("delete-local", "local-safe", approved_oid, "trunk")
 
@@ -275,6 +278,85 @@ class CleanBranchesBehaviorTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, result.returncode)
+        config_result = self.git(
+            "config",
+            "--get",
+            "branch.local-safe.test-marker",
+            check=False,
+        )
+        self.assertNotEqual(0, config_result.returncode)
+
+    def test_local_delete_refuses_branch_checked_out_in_linked_worktree(
+        self,
+    ) -> None:
+        expected_oid = self.rev_parse("linked-worktree")
+        linked_worktree = self.root / "linked-worktree"
+        self.git("worktree", "add", linked_worktree, "linked-worktree")
+
+        result = self.helper(
+            "delete-local",
+            "linked-worktree",
+            expected_oid,
+            "trunk",
+            check=False,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(
+            expected_oid,
+            self.rev_parse("refs/heads/linked-worktree"),
+        )
+
+    def test_local_atomic_delete_rejects_advance_after_last_read(self) -> None:
+        approved_oid = self.rev_parse("local-atomic")
+        self.git("config", "branch.local-atomic.test-marker", "preserve-on-race")
+        self.git("checkout", "-b", "local-atomic-new", "trunk")
+        self.git("commit", "--allow-empty", "-m", "atomic local advance")
+        advanced_oid = self.rev_parse("local-atomic-new")
+        self.git("checkout", "feature/current")
+
+        real_git = shutil.which("git")
+        if real_git is None:
+            self.fail("git executable is required")
+        wrapper_directory = self.root / "local-race-bin"
+        wrapper_directory.mkdir()
+        git_wrapper = wrapper_directory / "git"
+        git_wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "update-ref" ] && [ "$2" = "-d" ]; then\n'
+            f"  {shlex.quote(real_git)} -C {shlex.quote(str(self.work))} "
+            f"update-ref refs/heads/local-atomic {advanced_oid} "
+            f"{approved_oid}\n"
+            "fi\n"
+            f'exec {shlex.quote(real_git)} "$@"\n',
+            encoding="utf-8",
+        )
+        git_wrapper.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{wrapper_directory}{os.pathsep}{environment['PATH']}"
+
+        result = self.helper(
+            "delete-local",
+            "local-atomic",
+            approved_oid,
+            "trunk",
+            check=False,
+            env=environment,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(
+            advanced_oid,
+            self.rev_parse("refs/heads/local-atomic"),
+        )
+        self.assertEqual(
+            "preserve-on-race",
+            self.git(
+                "config",
+                "--get",
+                "branch.local-atomic.test-marker",
+            ).stdout.strip(),
+        )
 
     def test_remote_delete_refuses_base_remote(self) -> None:
         expected_oid = self.bare_ref(
@@ -333,7 +415,8 @@ class CleanBranchesBehaviorTests(unittest.TestCase):
         self.git("checkout", "feature/current")
 
         real_git = shutil.which("git")
-        self.assertIsNotNone(real_git)
+        if real_git is None:
+            self.fail("git executable is required")
         wrapper_directory = self.root / "race-bin"
         wrapper_directory.mkdir()
         git_wrapper = wrapper_directory / "git"
