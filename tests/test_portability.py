@@ -225,6 +225,78 @@ class PortabilityTests(unittest.TestCase):
         self.assertIn("git push --force-with-lease", text)
         self.assertNotRegex(text, r"git push\s+--force(?!-with-lease)")
 
+    def test_github_pr_uses_all_shared_workflow_references(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        expected_links = (
+            "../../lib/github/setup.md",
+            "../../lib/github/lookup-pr.md",
+            "../../lib/github/branch-naming.md",
+            "../../lib/github/commit-and-push.md",
+            "../../lib/github/detect-permission.md",
+            "../../lib/github/checkout-fork-branch.md",
+        )
+        for link in expected_links:
+            with self.subTest(link=link):
+                self.assertIn(link, text)
+
+    def test_github_pr_supports_create_and_existing_pr_update_routes(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("gh pr create", text)
+        self.assertIn("gh pr edit", text)
+        self.assertIn("existing pull request", text.lower())
+        self.assertIn("DEFAULT_BRANCH", text)
+        self.assertIn("PR_REPO", text)
+        self.assertIn("--force-with-lease", text)
+        self.assertRegex(
+            text,
+            r'if \[ -n "\$\{PR_NUMBER:-\}" \]; then\s+PR_ROUTE="update"',
+        )
+
+    def test_github_pr_delegates_repository_commit_policy(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("repository-local `git-commit` skill", text)
+        self.assertNotRegex(text, r"\b(?:feat|fix|refactor|chore|docs|test)/")
+        self.assertNotIn("## Testing\n- [ ]", text)
+
+    def test_github_pr_is_host_aware_and_fork_safe(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn('GH_HOST="$GITHUB_HOST"', text)
+        self.assertIn('--head "${PR_HEAD_PREFIX}${CURRENT_BRANCH}"', text)
+        self.assertIn("ROLE", text)
+        self.assertIn("HEAD_REPO", text)
+        self.assertIn("MAINTAINER_CHECKOUT_VERIFIED", text)
+
+    def test_github_pr_derives_title_and_body_from_pr_commit_range(self) -> None:
+        skill = ROOT / "skills/github-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertGreaterEqual(text.count('"$BASE_REF"..HEAD'), 2)
+        self.assertNotIn("Brief description of changes", text)
+        self.assertNotIn("Key change 1", text)
+
     def test_clean_branches_uses_portable_safe_deletion_contract(self) -> None:
         skill = ROOT / "skills/clean-branches/SKILL.md"
         helper = ROOT / "skills/clean-branches/scripts/clean-branches.sh"
