@@ -22,5 +22,56 @@ class CIToolConfigurationTests(unittest.TestCase):
         self.assertIn('include = ["tests"]', configuration)
 
 
+class CIWorkflowConfigurationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    def test_workflow_has_required_triggers_and_read_only_permission(self) -> None:
+        for required in (
+            "pull_request:",
+            "push:",
+            "branches: [main]",
+            "workflow_dispatch:",
+            "permissions:",
+            "contents: read",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.workflow)
+
+    def test_actions_are_pinned_and_credentials_are_not_persisted(self) -> None:
+        self.assertIn(
+            "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+            self.workflow,
+        )
+        self.assertIn(
+            "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            self.workflow,
+        )
+        self.assertEqual(2, self.workflow.count("persist-credentials: false"))
+
+    def test_runtime_matrix_requires_bubblewrap(self) -> None:
+        for required in (
+            'python-version: ["3.10", "3.14"]',
+            "fail-fast: false",
+            "sudo apt-get install --no-install-recommends --yes bubblewrap",
+            'PYPTO_SKILLS_REQUIRE_BWRAP: "1"',
+            "python -m unittest discover -s tests -v",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.workflow)
+
+    def test_workflow_runs_all_quality_checks(self) -> None:
+        for required in (
+            "ruff check tests",
+            "ruff format --check tests",
+            "pyright",
+            "git ls-files -z -- '*.sh'",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.workflow)
+        self.assertNotIn("continue-on-error", self.workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,3 +26,24 @@ until a dedicated installer is designed.
 
 Consumer installation and synchronization are not yet defined. This repository
 does not prescribe a submodule, vendoring, or synchronization mechanism.
+
+## Validation
+
+Run the standard-library test suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Install the pinned CI tools and run the same static checks with:
+
+```bash
+python -m pip install --requirement requirements-ci.txt
+ruff check tests
+ruff format --check tests
+pyright
+git ls-files -z -- '*.sh' | xargs -0 -r -n 1 bash -n
+```
+
+CI additionally installs Bubblewrap and requires the production validation
+sandbox to execute successfully.
