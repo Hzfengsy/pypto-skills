@@ -33,9 +33,7 @@ class SkillStructureTests(unittest.TestCase):
     def test_expected_skills_have_openai_metadata(self) -> None:
         for name in EXPECTED_SKILLS:
             with self.subTest(skill=name):
-                self.assertTrue(
-                    (SKILLS / name / "agents" / "openai.yaml").is_file()
-                )
+                self.assertTrue((SKILLS / name / "agents" / "openai.yaml").is_file())
 
     def test_expected_skills_have_resolvable_local_markdown_links(self) -> None:
         for name in EXPECTED_SKILLS:

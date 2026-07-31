@@ -72,12 +72,8 @@ REFERENCE_INPUTS = {
             "WORK_BRANCH",
         }
     ),
-    "common-issues.md": frozenset(
-        {"PR_NUMBER", "PR_REPO", "REPOSITORY_NODE_ID"}
-    ),
-    "detect-permission.md": frozenset(
-        {"GITHUB_HOST", "PR_NUMBER", "PR_REPO"}
-    ),
+    "common-issues.md": frozenset({"PR_NUMBER", "PR_REPO", "REPOSITORY_NODE_ID"}),
+    "detect-permission.md": frozenset({"GITHUB_HOST", "PR_NUMBER", "PR_REPO"}),
     "fetch-comments.md": frozenset(
         {
             "COMMENTS_CURSOR",
@@ -104,15 +100,9 @@ REFERENCE_INPUTS = {
 }
 
 BASH_BLOCK_RE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
-SHELL_VARIABLE_USE_RE = re.compile(
-    r"\$(?:{!?([A-Z][A-Z0-9_]*)|([A-Z][A-Z0-9_]*))"
-)
-SHELL_ASSIGNMENT_RE = re.compile(
-    r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE
-)
-SHELL_FOR_VARIABLE_RE = re.compile(
-    r"^\s*for\s+([A-Z][A-Z0-9_]*)\s+in\b", re.MULTILINE
-)
+SHELL_VARIABLE_USE_RE = re.compile(r"\$(?:{!?([A-Z][A-Z0-9_]*)|([A-Z][A-Z0-9_]*))")
+SHELL_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
+SHELL_FOR_VARIABLE_RE = re.compile(r"^\s*for\s+([A-Z][A-Z0-9_]*)\s+in\b", re.MULTILINE)
 SHELL_WHILE_READ_VARIABLE_RE = re.compile(
     r"^\s*while\b[^\n]*\bread(?:\s+-[A-Za-z]+)*\s+"
     r"([A-Z][A-Z0-9_]*)\s*;",
@@ -176,9 +166,7 @@ class PortabilityTests(unittest.TestCase):
         self.assertTrue(setup.is_file(), f"missing required reference: {setup}")
         setup_text = setup.read_text(encoding="utf-8")
         definitions = set(
-            re.findall(
-                r"(?m)^\s*(?:export )?([A-Z][A-Z0-9_]*)=", setup_text
-            )
+            re.findall(r"(?m)^\s*(?:export )?([A-Z][A-Z0-9_]*)=", setup_text)
         )
 
         for variable in GITHUB_CONTEXT_VARIABLES:
@@ -209,7 +197,7 @@ class PortabilityTests(unittest.TestCase):
 
     def test_push_branch_requires_verified_role_context(self) -> None:
         reference = bash_source(ROOT / "lib/github/commit-and-push.md")
-        self.assertIn('owner|fork)', reference)
+        self.assertIn("owner|fork)", reference)
         self.assertIn(
             '[ "$PR_HEAD_BRANCH" != "$CURRENT_BRANCH" ]',
             reference,
@@ -225,35 +213,32 @@ class PortabilityTests(unittest.TestCase):
     ) -> None:
         reference = bash_source(ROOT / "lib/github/detect-permission.md")
         self.assertIn(
-            'HEAD_CAN_PUSH=$(gh api --hostname "$GITHUB_HOST" '
-            '"repos/$HEAD_REPO"',
+            'HEAD_CAN_PUSH=$(gh api --hostname "$GITHUB_HOST" "repos/$HEAD_REPO"',
             reference,
         )
         self.assertIn('[ "$HEAD_CAN_PUSH" != "true" ]', reference)
 
     def test_rewritten_pushes_use_force_with_lease(self) -> None:
         reference = ROOT / "lib/github/commit-and-push.md"
-        self.assertTrue(
-            reference.is_file(), f"missing required reference: {reference}"
-        )
+        self.assertTrue(reference.is_file(), f"missing required reference: {reference}")
         text = reference.read_text(encoding="utf-8")
         self.assertIn("git push --force-with-lease", text)
         self.assertNotRegex(text, r"git push\s+--force(?!-with-lease)")
 
     def test_clean_branches_uses_portable_safe_deletion_contract(self) -> None:
         skill = ROOT / "skills/clean-branches/SKILL.md"
+        helper = ROOT / "skills/clean-branches/scripts/clean-branches.sh"
         self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        self.assertTrue(helper.is_file(), f"missing required helper: {helper}")
         if not skill.is_file():
             return
 
         text = skill.read_text(encoding="utf-8")
         self.assertIn("../../lib/github/setup.md", text)
+        self.assertIn("scripts/clean-branches.sh", text)
         self.assertIn("DEFAULT_BRANCH", text)
         self.assertIn("headRefOid", text)
-        self.assertRegex(
-            text,
-            r'git rev-parse .*\n.*headRefOid',
-        )
+        self.assertIn("Approved OID", text)
         self.assertIn("Never delete from `$BASE_REMOTE`", text)
 
         approval = re.search(r"(?im)^## Explicit approval gate$", text)
@@ -262,8 +247,8 @@ class PortabilityTests(unittest.TestCase):
             return
 
         destructive_commands = (
-            "git branch -D",
-            'git push "$PUSH_REMOTE" --delete',
+            '"$CLEAN_BRANCHES_HELPER" delete-local',
+            '"$CLEAN_BRANCHES_HELPER" delete-remote',
         )
         for command in destructive_commands:
             with self.subTest(command=command):

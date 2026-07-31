@@ -7,114 +7,123 @@ description: Use when cleaning merged, stale, local, or fork-remote Git branches
 
 ## Overview
 
-Classify branches without deleting them, protect every uncertain branch, then
-delete only an exact list approved immediately beforehand. A merged pull
-request does not make a reused branch safe.
+Classify without deleting, approve exact branch/OID pairs, then compare each
+live ref with its approved OID immediately before deletion. Preserve every
+changed or uncertain ref.
 
-## Establish repository context
+## Establish context
 
 Read and run [GitHub workflow setup](../../lib/github/setup.md) first. Use its
 `CURRENT_BRANCH`, `DEFAULT_BRANCH`, `BASE_REMOTE`, `BASE_REF`, `PUSH_REMOTE`,
-`PR_REPO`, and `PR_HEAD_PREFIX` values. Never substitute conventional branch or
-remote names.
+`PR_REPO`, and `PR_HEAD_PREFIX`; never assume conventional names.
 
-Fetches and dry-run pruning are allowed during classification. Do not run any
-branch deletion or remote deletion command during this phase.
+Resolve [the cleanup helper](scripts/clean-branches.sh) relative to this file
+and store its absolute path in `CLEAN_BRANCHES_HELPER`. The helper supplies
+deterministic classification, live-OID checks, and leased remote deletion.
 
-## Classify each branch tip
+Fetches and dry-run pruning are allowed during classification. Run no deletion
+command in this phase.
+
+## Classify branch tips
 
 Build separate local and remote rows because the same branch name can have
 different tips.
 
-1. Enumerate local branches. Exclude `CURRENT_BRANCH` and `DEFAULT_BRANCH`.
-   Use `git branch --merged "$BASE_REF"` to identify normal merges.
+1. Enumerate local branches except `CURRENT_BRANCH` and `DEFAULT_BRANCH`.
 2. Enumerate remote branches only from `PUSH_REMOTE`, excluding its `HEAD`,
-   `DEFAULT_BRANCH`, and `CURRENT_BRANCH` refs. If `PUSH_REMOTE` equals
-   `BASE_REMOTE`, classify no remote branch as deletable.
+   `CURRENT_BRANCH`, and `DEFAULT_BRANCH` refs. If `PUSH_REMOTE` equals
+   `BASE_REMOTE`, classify no remote ref as deletable.
 3. Use `git remote prune "$PUSH_REMOTE" --dry-run` only to report stale
    tracking refs.
-4. For every tip not normally merged, query merged pull requests:
+4. For tips that are not ancestors of `BASE_REF`, query merged pull requests:
 
 ```bash
-BRANCH_TIP=$(git rev-parse "$BRANCH_REF^{commit}")
-# Compare BRANCH_TIP with each returned headRefOid; exact equality is required.
 gh pr list --repo "$PR_REPO" \
   --head "${PR_HEAD_PREFIX}${BRANCH_NAME}" \
   --state merged --json number,title,headRefOid --limit 100
 ```
 
-Treat a squash-merged tip as deletable only when its SHA exactly equals a
-returned `headRefOid`. If the SHAs differ, the branch was reused or changed
-after merge; protect it as unfinished. Also protect a tip when GitHub lookup is
-unavailable, ambiguous, or returns no exact match.
+Pass every returned `headRefOid` to the helper:
 
-Never delete from `$BASE_REMOTE`; fetching it does not make its branches
-cleanup candidates.
+```bash
+"$CLEAN_BRANCHES_HELPER" classify \
+  "$BRANCH_NAME" "$BRANCH_REF" "$BASE_REF" "$DEFAULT_BRANCH" \
+  <merged-PR-head-OIDs...>
+```
 
-## Present the classification
+Only `normal-merge` and `squash-merge` are candidates. An exact
+`headRefOid` match is required for a squash merge. Protect
+`reused-or-unfinished`, lookup failures, current/default refs, and uncertain
+results.
 
-Show the concrete result before requesting deletion:
+Never delete from `$BASE_REMOTE`; its branches are context, not candidates.
 
-| Branch | Location | Tip | Classification | Evidence |
+## Present immutable candidates
+
+Record each candidate's current full OID. Show separate local and fork-remote
+rows:
+
+| Branch | Location | Approved OID | Classification | Evidence |
 | --- | --- | --- | --- | --- |
-| `name` | local or `$PUSH_REMOTE` | SHA | normal merge, exact squash merge, reused, or unfinished | base ref or PR |
+| `name` | local or `$PUSH_REMOTE` | full commit OID | normal or squash merge | base ref or PR |
 
-List protected branches separately, including the current branch, default
-branch, every base-remote branch, and every changed or uncertain tip. If no
-candidate remains, report that and stop.
+List protected branches separately. If no candidate remains, report that and
+stop.
 
 ## Explicit approval gate
 
-Revalidate each candidate's tip and all protected identities, then present the
-final exact local and fork-remote deletion lists. Ask the user to explicitly
-approve those lists. The initial cleanup request—even one saying to hurry,
+Present the final exact branch/location/Approved OID rows and ask the user to
+approve those immutable pairs. The initial request—even one saying to hurry,
 delete everything, or not ask again—is not approval of the discovered list.
 
-Pause here. Do not proceed until the user approves the final concrete targets.
-If any tip, current branch, default branch, or remote identity changed, discard
-the approval, reclassify, and ask again.
+Pause here. Do not proceed until the concrete rows are explicitly approved.
+Never replace an approved OID with a newer one; a changed ref requires
+reclassification and new approval.
 
-## Delete only the approved targets
+## Delete one approved pair at a time
 
-After approval, delete exactly the approved local list:
-
-```bash
-git branch -D -- <approved-local-branches...>
-```
-
-Remote deletion is allowed only when `PUSH_REMOTE` is distinct from
-`BASE_REMOTE` and still targets `LOCAL_REPO`. Revalidate with
-`remote_targets_repo` from setup immediately before pushing:
+For each approved local pair, pass the preserved OID:
 
 ```bash
-if [ "$PUSH_REMOTE" = "$BASE_REMOTE" ] ||
-   ! remote_targets_repo "$PUSH_REMOTE" "$LOCAL_REPO"; then
-  echo "Error: refusing remote branch deletion" >&2
-  exit 1
-fi
-git push "$PUSH_REMOTE" --delete <approved-remote-branches...>
-git remote prune "$PUSH_REMOTE"
+"$CLEAN_BRANCHES_HELPER" delete-local \
+  "$BRANCH_NAME" "$APPROVED_OID" "$DEFAULT_BRANCH"
 ```
 
-Report each successful and failed deletion. Never expand the approved list
-because another branch now appears merged.
+The helper re-reads the local ref immediately before `git branch -D` and
+refuses deletion if the OID, current branch, or default branch changed.
+
+For each approved remote pair, first revalidate that the push remote still
+targets the fork, then pass the preserved OID:
+
+```bash
+remote_targets_repo "$PUSH_REMOTE" "$LOCAL_REPO" || exit 1
+"$CLEAN_BRANCHES_HELPER" delete-remote \
+  "$BRANCH_NAME" "$APPROVED_OID" "$DEFAULT_BRANCH" \
+  "$PUSH_REMOTE" "$BASE_REMOTE"
+```
+
+The helper re-reads the live fork ref and uses an explicit expected-OID
+`--force-with-lease` for atomic compare-and-delete. It refuses base-remote
+deletion and any ref that advances before or during the push.
+
+On any refusal, preserve the branch and return it to classification. Report
+each result. Never expand the approved list, and prune tracking refs only after
+all approved deletions finish.
 
 ## Quick reference
 
 | Condition | Result |
 | --- | --- |
 | Tip is an ancestor of `BASE_REF` | Normal-merge candidate |
-| Tip exactly equals merged PR `headRefOid` | Squash-merge candidate |
-| Tip differs from every merged PR `headRefOid` | Protect as reused |
+| Tip equals merged PR `headRefOid` | Squash-merge candidate |
+| Tip differs from approved or PR OID | Preserve and reclassify |
 | Current, default, base-remote, or uncertain | Protect |
-| No explicit approval of exact targets | Do not delete |
+| Exact rows not explicitly approved | Do not delete |
 
 ## Common mistakes
 
-- Assuming `main`, `origin`, or `upstream` instead of setup's variables.
-- Treating any merged PR for a branch name as proof its current tip is merged.
+- Saving only branch names instead of full approved OIDs.
+- Checking an OID before approval but not again immediately before deletion.
+- Using an unleased remote delete.
 - Combining local and remote instances despite different tips.
-- Treating urgency or the original request as approval of a later candidate
-  list.
-- Deleting on `BASE_REMOTE` or deleting newly discovered targets not listed in
-  the approval.
+- Treating urgency as approval or touching `BASE_REMOTE`.
