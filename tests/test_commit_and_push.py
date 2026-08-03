@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.ci_policy import enforce_validation_sandbox
 from tests.skill_assertions import ROOT
 
 HELPER = ROOT / "lib/github/scripts/prepare-and-push.sh"
@@ -728,8 +729,7 @@ esac
             "host-only\n",
             encoding="utf-8",
         )
-        if not self.validation_sandbox_is_operational():
-            self.skipTest("bubblewrap isolation is unavailable and fails closed")
+        enforce_validation_sandbox(self.validation_sandbox_is_operational())
 
         result = self.run_validation_sandbox(
             "test -f base.txt && test -f feature.txt && "
