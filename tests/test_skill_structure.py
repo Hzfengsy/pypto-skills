@@ -4,7 +4,15 @@ import unittest
 
 from tests.skill_assertions import SKILLS, frontmatter, markdown_links, skill_dirs
 
-EXPECTED_SKILLS: tuple[str, ...] = ("clean-branches", "fix-pr", "github-pr")
+EXPECTED_SKILLS: tuple[str, ...] = (
+    "auto-pr",
+    "clean-branches",
+    "create-issue",
+    "fix-issue",
+    "fix-pr",
+    "git-commit",
+    "github-pr",
+)
 
 
 class SkillStructureTests(unittest.TestCase):

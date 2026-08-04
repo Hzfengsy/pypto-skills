@@ -29,7 +29,11 @@ REQUIRED_GITHUB_REFERENCES = (
     ROOT / "lib/github/fetch-comments.md",
     ROOT / "lib/github/reply-and-resolve.md",
     ROOT / "lib/github/checkout-fork-branch.md",
+    ROOT / "lib/github/issue-context.md",
+    ROOT / "lib/github/issue-templates.md",
 )
+
+REQUIRED_REPOSITORY_REFERENCES = (ROOT / "lib/repository/policy.md",)
 
 GITHUB_CONTEXT_VARIABLES = (
     "REPO_ROOT",
@@ -104,6 +108,8 @@ REFERENCE_INPUTS = {
     "checkout-fork-branch.md": frozenset(
         {"HEAD_REPO", "PR_HEAD_BRANCH", "PR_NUMBER", "PUSH_REMOTE", "ROLE"}
     ),
+    "issue-context.md": frozenset(),
+    "issue-templates.md": frozenset(),
 }
 
 BASH_BLOCK_RE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
@@ -167,6 +173,51 @@ class PortabilityTests(unittest.TestCase):
         for path in REQUIRED_GITHUB_REFERENCES:
             with self.subTest(path=path):
                 self.assertTrue(path.is_file(), f"missing required reference: {path}")
+
+    def test_required_repository_references_exist(self) -> None:
+        for path in REQUIRED_REPOSITORY_REFERENCES:
+            with self.subTest(path=path):
+                self.assertTrue(path.is_file(), f"missing required reference: {path}")
+
+    def test_git_commit_delegates_consumer_repository_policy(self) -> None:
+        skill = ROOT / "skills/git-commit/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("../../lib/repository/policy.md", text)
+        self.assertNotRegex(text, r"\b(?:pytest|cargo test|npm test)\b")
+        self.assertNotRegex(text, r"\b(?:feat|fix|refactor|chore|docs|test)\([^)]*\):")
+        self.assertNotRegex(text, r"(?m)^\s*git add (?:-A|--all|\.|\*)")
+
+    def test_create_issue_has_no_fixed_repository_or_project_policy(self) -> None:
+        skill = ROOT / "skills/create-issue/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("../../lib/github/issue-context.md", text)
+        self.assertIn("../../lib/github/issue-templates.md", text)
+        self.assertNotRegex(text, r"(?i)project\s+#?\d+")
+        self.assertNotRegex(text, r"(?m)^\s*gh issue create\b")
+        self.assertLessEqual(len(text.splitlines()), 200)
+
+    def test_fix_issue_has_no_fixed_repository_project_or_test_policy(self) -> None:
+        skill = ROOT / "skills/fix-issue/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("../../lib/repository/policy.md", text)
+        self.assertIn("../../lib/github/issue-context.md", text)
+        self.assertIn("../../lib/github/branch-naming.md", text)
+        self.assertNotRegex(text, r"(?i)project\s+#?\d+")
+        self.assertNotRegex(text, r"\b(?:pytest|cargo test|npm test)\b")
+        self.assertNotRegex(text, r"(?m)^\s*(?:fix|feat|refactor|docs|support)/")
+        self.assertLessEqual(len(text.splitlines()), 200)
 
     def test_setup_defines_context_contract(self) -> None:
         setup = ROOT / "lib/github/setup.md"
@@ -252,13 +303,32 @@ class PortabilityTests(unittest.TestCase):
                 self.assertIn(link, text)
 
     def test_pull_request_skills_fit_the_portable_instruction_budget(self) -> None:
-        for relative_path in ("skills/fix-pr/SKILL.md", "skills/github-pr/SKILL.md"):
+        for relative_path in (
+            "skills/auto-pr/SKILL.md",
+            "skills/fix-pr/SKILL.md",
+            "skills/github-pr/SKILL.md",
+        ):
             path = ROOT / relative_path
             with self.subTest(path=relative_path):
                 self.assertLessEqual(
                     len(path.read_text(encoding="utf-8").splitlines()),
                     200,
                 )
+
+    def test_auto_pr_contains_no_publication_or_repair_implementation(self) -> None:
+        skill = ROOT / "skills/auto-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn("../git-commit/SKILL.md", text)
+        self.assertIn("../github-pr/SKILL.md", text)
+        self.assertIn("../fix-pr/SKILL.md", text)
+        self.assertIn("../../lib/repository/policy.md", text)
+        self.assertNotRegex(text, r"(?m)^\s*(?:gh|git)\s+(?:pr|api|push|commit)\b")
+        self.assertNotIn("resolveReviewThread", text)
+        self.assertNotIn("reviewThreads", text)
 
     def test_github_pr_selects_create_branch_before_push_authority(self) -> None:
         text = (ROOT / "skills/github-pr/SKILL.md").read_text(encoding="utf-8")
@@ -349,13 +419,17 @@ class PortabilityTests(unittest.TestCase):
             )
             self.assertIn('"repos/$PR_REPO/pulls"', document_text)
             self.assertIn('-f "head=$HEAD_SELECTOR"', document_text)
-            self.assertIn("--paginate --slurp --jq 'add'", document_text)
+            self.assertIn("--paginate --slurp", document_text)
+            self.assertIn("separately with `jq -e 'add'`", document_text)
+            self.assertNotIn("--slurp --jq", document_text)
         self.assertNotRegex(bash_source(skill), r"gh pr list[\s\S]{0,200}--head")
         self.assertNotRegex(reference_text, r"gh pr list[\s\S]{0,200}--head")
         self.assertIn('gh api --hostname "$GITHUB_HOST" --method GET', helper_text)
         self.assertIn('"repos/$PR_REPO/pulls"', helper_text)
         self.assertIn('-f "head=$HEAD_SELECTOR"', helper_text)
-        self.assertIn("--paginate --slurp --jq 'add'", helper_text)
+        self.assertIn("--paginate --slurp", helper_text)
+        self.assertIn("| jq -ce '", helper_text)
+        self.assertNotIn("--slurp --jq", helper_text)
 
     def test_pull_request_creation_uses_host_pinned_rest_post(self) -> None:
         skill = ROOT / "skills/github-pr/SKILL.md"
@@ -500,6 +574,48 @@ class PortabilityTests(unittest.TestCase):
         self.assertGreater(confirmation, findings)
         self.assertGreater(fixes, confirmation)
         self.assertIn("fix immediately", text)
+
+    def test_fix_pr_auto_pr_authorization_is_narrow_and_fail_closed(self) -> None:
+        skill = ROOT / "skills/fix-pr/SKILL.md"
+        self.assertTrue(skill.is_file(), f"missing required skill: {skill}")
+        if not skill.is_file():
+            return
+
+        text = skill.read_text(encoding="utf-8")
+        findings = text.find("## Classify and present findings")
+        composed = text.find("## Validate auto-pr composed authorization")
+        confirmation = text.find("## Explicit confirmation gate")
+        self.assertGreater(composed, findings)
+        self.assertGreater(confirmation, composed)
+        gate = text[confirmation : text.find("## Apply selected fixes")]
+        self.assertIn("Do not edit until the user confirms", gate)
+        self.assertIn("every direct invocation", text)
+        self.assertRegex(text, r"only when the active caller is `auto-pr`")
+        for requirement in (
+            "active caller is `auto-pr`",
+            "exact host, repository, number, and head",
+            "unchanged numbered inventory entry and stable finding ID",
+            "`ci-objective`, `correctness`, or `style-policy`",
+            "successful guard iteration and attempt evidence",
+            "standing authorization from an explicit `auto-pr` invocation",
+            "independently revalidate",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, text)
+        self.assertIn("fall back to the explicit confirmation gate", text)
+        self.assertIn("unknown or deferred kind", text)
+        for mismatch in (
+            "identity or head mismatch",
+            "inventory entry or stable finding ID mismatch",
+            "kind or classification mismatch",
+            "guard or ledger mismatch",
+        ):
+            with self.subTest(mismatch=mismatch):
+                self.assertIn(mismatch, text)
+        self.assertIn("do not auto-repair", text)
+        self.assertIn("without incrementing it", text)
+        self.assertRegex(text, r"scope\s+growth")
+        self.assertIn("same stable key", text)
 
     def test_fix_pr_delegates_repository_policy(self) -> None:
         skill = ROOT / "skills/fix-pr/SKILL.md"
