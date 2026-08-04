@@ -125,6 +125,63 @@ class StageOwnedBehaviorTests(unittest.TestCase):
             "?? scratch.txt", self.git("status", "--porcelain").stdout.splitlines()
         )
 
+    def test_stage_helper_accepts_an_explicit_directory_symlink(self) -> None:
+        target = self.work / "owned-target"
+        target.mkdir()
+        (target / "content.txt").write_text("target\n", encoding="utf-8")
+        (self.work / "owned-link").symlink_to("owned-target", target_is_directory=True)
+
+        result = self.helper("owned-link")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            "120000",
+            self.git("ls-files", "--stage", "owned-link").stdout.split()[0],
+        )
+
+    def test_stage_helper_still_rejects_a_real_directory(self) -> None:
+        (self.work / "owned-directory").mkdir()
+        (self.work / "owned-directory" / "content.txt").write_text(
+            "content\n", encoding="utf-8"
+        )
+
+        result = self.helper("owned-directory", check=False)
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("directory path is not allowed", result.stderr)
+
+    def test_stage_helper_accepts_an_explicit_tracked_submodule(self) -> None:
+        source = self.work.parent / "submodule-source"
+        run("git", "init", "--initial-branch=trunk", source, cwd=self.work.parent)
+        run("git", "config", "user.email", "portable@example.com", cwd=source)
+        run("git", "config", "user.name", "Portable Tests", cwd=source)
+        (source / "version.txt").write_text("one\n", encoding="utf-8")
+        run("git", "add", "version.txt", cwd=source)
+        run("git", "commit", "-m", "initial", cwd=source)
+
+        self.git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            str(source),
+            "vendor",
+        )
+        self.git("commit", "-m", "add submodule")
+
+        (source / "version.txt").write_text("two\n", encoding="utf-8")
+        run("git", "commit", "-am", "update", cwd=source)
+        run("git", "fetch", cwd=self.work / "vendor")
+        run("git", "checkout", "FETCH_HEAD", cwd=self.work / "vendor")
+
+        result = self.helper("vendor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            run("git", "rev-parse", "HEAD", cwd=source).stdout.strip(),
+            self.git("rev-parse", ":vendor").stdout.strip(),
+        )
+
     def test_stage_helper_rejects_an_unrelated_pre_staged_path(self) -> None:
         self.git("add", "notes.txt")
         result = self.helper("changed.txt", check=False)
