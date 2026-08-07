@@ -107,8 +107,7 @@ trap 'handle_signal 141 PIPE' PIPE
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  issue-create.sh preview HOST REPO TITLE BODY_FILE [LABEL...]
-  issue-create.sh create HOST REPO TITLE BODY_FILE TOKEN [LABEL...]
+  issue-create.sh create HOST REPO TITLE BODY_FILE [LABEL...]
 EOF
   exit 2
 }
@@ -131,34 +130,6 @@ has_control_character() {
   esac
 }
 
-emit_text() {
-  local value=$1 length
-  length=$(printf '%s' "$value" | wc -c | tr -d '[:space:]')
-  printf '%s:' "$length"
-  printf '%s' "$value"
-}
-
-emit_file() {
-  local path=$1 length
-  length=$(wc -c <"$path" | tr -d '[:space:]')
-  printf '%s:' "$length"
-  cat -- "$path"
-}
-
-payload_token() {
-  local host=$1 repo=$2 title=$3 body_file=$4
-  shift 4
-  {
-    emit_text "$host"
-    emit_text "$repo"
-    emit_text "$title"
-    for label in "$@"; do
-      emit_text "$label"
-    done
-    emit_file "$body_file"
-  } | git hash-object --stdin
-}
-
 validate_payload() {
   local host=$1 repo=$2 title=$3 body_file=$4
   shift 4
@@ -176,6 +147,12 @@ validate_payload() {
     if has_control_character "$label"; then
       fail "issue label contains a control character"
     fi
+    # `gh issue create --help` documents `--label "bug,help wanted"` as the form
+    # for two labels, so the CLI would split this name instead of applying it.
+    # The recorded payload would then claim an identity GitHub never received.
+    case "$label" in
+      *,*) fail "issue label contains a comma, which the CLI splits into separate labels: $label" ;;
+    esac
   done
 }
 
@@ -194,44 +171,51 @@ snapshot_body() {
   [ -s "$BODY_SNAPSHOT" ] || fail "snapshotted issue body is empty"
 }
 
-preview_issue() {
-  [ "$#" -ge 4 ] || usage
-  local host=$1 repo=$2 title=$3 body_file=$4 token label label_length
-  shift 4
-  validate_payload "$host" "$repo" "$title" "$body_file" "$@"
-  snapshot_body "$body_file"
-  token=$(payload_token "$host" "$repo" "$title" "$BODY_SNAPSHOT" "$@") ||
-    fail "unable to compute issue preview token"
-  printf 'Host: %s\n' "$host"
-  printf 'Repository: %s\n' "$repo"
-  printf 'Title: %s\n' "$title"
-  printf 'Labels (%s):\n' "$#"
+# Record the exact bytes that will be published, read back from the private
+# snapshot rather than the caller's mutable body file. Nothing binds the create
+# route to a payload approved earlier, so a divergence between the approved text
+# and the published one must at least be visible. Recording runs before the
+# mutation boundary and fails closed, so nothing is created unrecorded.
+record_published_payload() {
+  local host=$1 repo=$2 title=$3
+  shift 3
+  local label header body_bytes
+  # Never pass the body through command substitution: that strips every
+  # trailing newline, so a body differing only in trailing bytes would be
+  # recorded as one the user did approve. The bytes are copied out verbatim and
+  # framed by a declared length, and exactly one newline separates them from the
+  # end marker.
+  body_bytes=$(wc -c <"$BODY_SNAPSHOT" | tr -d '[:space:]') ||
+    fail "unable to record the payload being published"
+  header="ISSUE_CREATE_PUBLISHING
+Host: $host
+Repository: $repo
+Title: $title
+Labels ($#):"
   for label in "$@"; do
-    label_length=$(printf '%s' "$label" | wc -c | tr -d '[:space:]')
-    printf -- '- %s:' "$label_length"
-    printf '%s\n' "$label"
+    header="$header
+- $label"
   done
-  printf 'Body:\n'
-  cat -- "$BODY_SNAPSHOT"
-  case "$(tail -c 1 "$BODY_SNAPSHOT" | wc -l | tr -d '[:space:]')" in
-    0) printf '\n' ;;
-  esac
-  printf 'ISSUE_CREATE:%s\n' "$token"
+  header="$header
+Body ($body_bytes bytes):"
+  # Chain with && so the first failure, not the last write, decides the status.
+  {
+    printf '%s\n' "$header" &&
+      cat -- "$BODY_SNAPSHOT" &&
+      printf '\n%s\n' 'ISSUE_CREATE_PUBLISHING_END'
+  } >&3 || fail "unable to record the payload being published"
 }
 
 create_issue() {
-  [ "$#" -ge 5 ] || usage
-  local host=$1 repo=$2 title=$3 body_file=$4 approved_token=$5
-  local current_token issue_url issue_prefix issue_number capture_directory gh_status
-  shift 5
+  [ "$#" -ge 4 ] || usage
+  local host=$1 repo=$2 title=$3 body_file=$4
+  local issue_url issue_prefix issue_number capture_directory gh_status
+  shift 4
   validate_payload "$host" "$repo" "$title" "$body_file" "$@"
   TARGET_HOST=$host
   TARGET_REPO=$repo
   snapshot_body "$body_file"
-  current_token=$(payload_token "$host" "$repo" "$title" "$BODY_SNAPSHOT" "$@") ||
-    fail "unable to recompute issue preview token"
-  [ "$approved_token" = "$current_token" ] ||
-    fail "issue payload changed after preview; preview it again"
+  record_published_payload "$host" "$repo" "$title" "$@"
   command -v gh >/dev/null 2>&1 || fail "GitHub CLI is unavailable"
 
   capture_directory=${TMPDIR:-/tmp}
@@ -304,7 +288,6 @@ create_issue() {
 command=$1
 shift
 case "$command" in
-  preview) preview_issue "$@" ;;
   create)
     CREATE_STATE="prewrite"
     create_issue "$@"
