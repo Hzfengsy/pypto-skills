@@ -58,12 +58,13 @@ resolves to its upstream and the fork disappears from the whole workflow.
 validates each candidate through host-pinned REST metadata, and selects the
 write target by evidence:
 
-- a fork remote the authenticated account can actually push to wins, so a
-  remote for somebody else's fork never becomes the push target;
-- several writable forks resolve only when exactly one belongs to the
-  authenticated account, and stay an error otherwise;
-- with no writable fork, the base repository wins only when the account can
-  push to it;
+- a fork the authenticated account both owns and can push to wins. Write
+  access is not ownership: an account can be a collaborator on somebody else's
+  fork, and such a fork never becomes the push target, whether it is the only
+  writable one or one of several;
+- more than one owned writable fork is an error rather than a guess;
+- with no owned writable fork, the base repository wins only when the account
+  can push to it;
 - with neither, the helper fails explicitly and names the base repository and
   every fork remote it rejected. Never fall back to a repository the account
   cannot push to, and never defer that failure until Git refuses the push.

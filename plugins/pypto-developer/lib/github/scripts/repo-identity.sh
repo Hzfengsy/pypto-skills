@@ -107,13 +107,16 @@ response_identity() {
 
 # Report every fork remote and why no repository is writable, then stop. A
 # missing write path is an explicit failure, never a silent fallback to a
-# repository the account cannot push to.
+# repository the account cannot push to or does not own.
 report_unwritable() {
-  local host=$1 base_repo=$2 fork_names=$3
+  local host=$1 base_repo=$2 fork_names=$3 unowned_names=$4 login=$5
   if [ -n "$fork_names" ]; then
-    detail "fork remotes without push permission: $fork_names"
+    detail "fork remotes: $fork_names"
   else
     detail "fork remotes: none"
+  fi
+  if [ -n "$unowned_names" ]; then
+    detail "writable but not owned by $login: $unowned_names"
   fi
   detail "base repository without push permission: $base_repo"
   detail "fork $base_repo on $host and add the fork as a Git remote,"
@@ -138,9 +141,10 @@ resolve() {
   local github_host="" candidate metadata base_repo="" local_repo=""
   local candidate_full candidate_base candidate_is_fork candidate_can_push
   local base_metadata base_full base_parent base_is_fork base_can_push
-  local default_branch base_url base_host base_repo_path login owner
+  local default_branch base_url base_host base_repo_path owner login=""
   local fork_names="" local_can_push="" is_fork=false
-  local writable_count=0 writable_first="" owned_count=0 owned_first=""
+  local writable_count=0 owned_count=0 owned_first="" owned_names=""
+  local unowned_names=""
   declare -A candidates=()
   declare -A fork_push=()
 
@@ -207,19 +211,15 @@ resolve() {
   done
 
   if [ "$require_push" -eq 1 ]; then
-    # A fork is only the write target when the account can actually push to
-    # it, so a reviewer's remote for somebody else's fork never wins.
+    # A fork is the write target only when the authenticated account both owns
+    # it and can push to it. Write access is not ownership: an account can be
+    # a collaborator on somebody else's fork, and that fork must never become
+    # the push target, whether it is the only writable one or one of several.
     for candidate in "${!fork_push[@]}"; do
-      if [ "${fork_push[$candidate]}" = "true" ]; then
-        writable_count=$((writable_count + 1))
-        writable_first=$candidate
-      fi
+      [ "${fork_push[$candidate]}" = "true" ] || continue
+      writable_count=$((writable_count + 1))
     done
-    if [ "$writable_count" -eq 1 ]; then
-      local_repo=$writable_first
-    elif [ "$writable_count" -gt 1 ]; then
-      # Several writable forks are only unambiguous when exactly one belongs
-      # to the authenticated account.
+    if [ "$writable_count" -gt 0 ]; then
       login=$(gh api --hostname "$github_host" user --jq '.login') ||
         fail "authenticated GitHub account could not be read"
       [ -n "$login" ] || fail "authenticated GitHub account is empty"
@@ -229,13 +229,18 @@ resolve() {
         if [[ "${owner,,}" = "${login,,}" ]]; then
           owned_count=$((owned_count + 1))
           owned_first=$candidate
+          owned_names="${owned_names:+$owned_names, }$candidate"
+        else
+          unowned_names="${unowned_names:+$unowned_names, }$candidate"
         fi
       done
-      if [ "$owned_count" -ne 1 ]; then
-        detail "writable fork remotes: $fork_names"
+      if [ "$owned_count" -gt 1 ]; then
+        detail "writable fork remotes owned by $login: $owned_names"
         fail "multiple writable fork repositories were found"
       fi
-      local_repo=$owned_first
+      if [ "$owned_count" -eq 1 ]; then
+        local_repo=$owned_first
+      fi
     fi
     if [ -n "$local_repo" ]; then
       local_can_push=true
@@ -243,7 +248,8 @@ resolve() {
       local_repo=$base_repo
       local_can_push=true
     else
-      report_unwritable "$github_host" "$base_repo" "$fork_names"
+      report_unwritable "$github_host" "$base_repo" "$fork_names" \
+        "$unowned_names" "$login"
     fi
   else
     if [ "${#fork_push[@]}" -gt 1 ]; then

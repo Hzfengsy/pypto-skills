@@ -290,7 +290,11 @@ class PortabilityTests(unittest.TestCase):
             (ROOT / "lib/github/setup.md").read_text(encoding="utf-8").split()
         )
         self.assertIn(
-            "a fork remote the authenticated account can actually push to wins",
+            "a fork the authenticated account both owns and can push to wins",
+            collapsed,
+        )
+        self.assertIn(
+            "Write access is not ownership",
             collapsed,
         )
         self.assertIn(

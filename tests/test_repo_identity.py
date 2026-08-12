@@ -186,7 +186,8 @@ print(json.dumps(response))
                     default_branch="work",
                 ),
                 repository("acme/widget", can_push=True),
-            ]
+            ],
+            user="contributor",
         )
 
         result = self.resolve("--require-push")
@@ -298,7 +299,75 @@ print(json.dumps(response))
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("contributor/widget", json.loads(result.stdout)["local_repo"])
 
-    def test_two_unowned_writable_forks_stop_instead_of_guessing(self) -> None:
+    def test_sole_writable_fork_owned_by_another_account_never_wins(self) -> None:
+        # Write access to somebody else's fork is not ownership: the account
+        # falls back to the writable base rather than publishing to that fork.
+        self.add_remote("origin", "acme/widget")
+        self.add_remote("teammate", "teammate/widget")
+        self.write_fixtures(
+            [
+                repository("acme/widget", can_push=True),
+                repository(
+                    "teammate/widget", fork=True, can_push=True, parent="acme/widget"
+                ),
+            ],
+            user="contributor",
+        )
+
+        result = self.resolve("--require-push")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        identity = json.loads(result.stdout)
+        self.assertEqual("acme/widget", identity["local_repo"])
+        self.assertFalse(identity["is_fork"])
+
+    def test_sole_unowned_writable_fork_without_writable_base_stops(self) -> None:
+        self.add_remote("origin", "acme/widget")
+        self.add_remote("teammate", "teammate/widget")
+        self.write_fixtures(
+            [
+                repository("acme/widget", can_push=False),
+                repository(
+                    "teammate/widget", fork=True, can_push=True, parent="acme/widget"
+                ),
+            ],
+            user="contributor",
+        )
+
+        result = self.resolve("--require-push")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("no writable repository", result.stderr)
+        self.assertIn("writable but not owned by contributor", result.stderr)
+        self.assertIn("teammate/widget", result.stderr)
+        self.assertEqual("", result.stdout)
+
+    def test_two_owned_writable_forks_stop_instead_of_guessing(self) -> None:
+        self.add_remote("origin", "contributor/widget")
+        self.add_remote("mirror", "contributor/widget-mirror")
+        self.write_fixtures(
+            [
+                repository(
+                    "contributor/widget", fork=True, can_push=True, parent="acme/widget"
+                ),
+                repository(
+                    "contributor/widget-mirror",
+                    fork=True,
+                    can_push=True,
+                    parent="acme/widget",
+                ),
+                repository("acme/widget", can_push=False),
+            ],
+            user="contributor",
+        )
+
+        result = self.resolve("--require-push")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("multiple writable fork repositories", result.stderr)
+        self.assertIn("contributor/widget-mirror", result.stderr)
+
+    def test_writable_forks_owned_by_nobody_present_stop(self) -> None:
         self.add_remote("origin", "contributor/widget")
         self.add_remote("teammate", "teammate/widget")
         self.write_fixtures(
@@ -317,7 +386,10 @@ print(json.dumps(response))
         result = self.resolve("--require-push")
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("multiple writable fork repositories", result.stderr)
+        self.assertIn("no writable repository", result.stderr)
+        self.assertIn("writable but not owned by someone-else", result.stderr)
+        self.assertIn("contributor/widget", result.stderr)
+        self.assertIn("teammate/widget", result.stderr)
 
     def test_read_only_resolution_keeps_the_fork_without_permission_evidence(
         self,
