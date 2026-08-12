@@ -6,6 +6,8 @@ Use these diagnostics with the shared context from [setup](setup.md).
 | --- | --- |
 | GitHub authentication fails | Stop and ask the user to run `gh auth login` |
 | Repository identity is empty | Stop; verify the checkout remotes and GitHub host |
+| No writable repository for the checkout | Stop; fork the base repository and add that fork as a remote, or request push access. Never retarget the push at a repository the account cannot write |
+| Several writable fork remotes | Stop; keep only the authenticated account's fork remote for this checkout |
 | No remote matches `PR_REPO` | Add or correct the base-repository remote, then rerun setup |
 | No remote matches the writable repository | Add or correct the contributor remote, then rerun setup |
 | Default branch cannot be read | Stop rather than substituting a branch name |
