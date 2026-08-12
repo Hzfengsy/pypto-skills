@@ -41,61 +41,57 @@ fi
 
 ## 2. Resolve GitHub repository identity
 
-`LOCAL_REPO` is the repository represented by this checkout. `PR_REPO` is the
-repository that receives pull requests: the parent for a fork, otherwise the
-local repository.
+`LOCAL_REPO` is the writable repository this checkout pushes to. `PR_REPO` is
+the repository that receives pull requests: the parent for a fork, otherwise
+the same repository.
+
+Resolve [`scripts/repo-identity.sh`](scripts/repo-identity.sh) relative to this
+reference as the absolute executable `REPO_IDENTITY_HELPER`, never from the
+consumer repository. Never substitute `gh repo view` or any other ambient
+GitHub CLI repository selection. `gh` resolves a *base* repository from the
+remote set, prefers a parent over the checkout's own fork, and asks the user to
+pick one when several remotes qualify. That answers a different question than
+"which repository does this checkout push to", so a fork checkout silently
+resolves to its upstream and the fork disappears from the whole workflow.
+
+`resolve --require-push` reads every remote fetch and push URL, pins one host,
+validates each candidate through host-pinned REST metadata, and selects the
+write target by evidence:
+
+- a fork the authenticated account both owns and can push to wins. Write
+  access is not ownership: an account can be a collaborator on somebody else's
+  fork, and such a fork never becomes the push target, whether it is the only
+  writable one or one of several;
+- more than one owned writable fork is an error rather than a guess;
+- with no owned writable fork, the base repository wins only when the account
+  can push to it;
+- with neither, the helper fails explicitly and names the base repository and
+  every fork remote it rejected. Never fall back to a repository the account
+  cannot push to, and never defer that failure until Git refuses the push.
 
 ```bash
-LOCAL_REPO_DATA=$(gh repo view --json nameWithOwner,url) || {
-  echo "Error: GitHub repository identity could not be resolved" >&2
-  exit 1
-}
-LOCAL_REPO=$(printf '%s' "$LOCAL_REPO_DATA" | jq -r '.nameWithOwner')
-LOCAL_REPO_URL=$(printf '%s' "$LOCAL_REPO_DATA" | jq -r '.url')
-if [ -z "$LOCAL_REPO" ] || [ "$LOCAL_REPO" = "null" ]; then
-  echo "Error: GitHub repository identity is empty" >&2
-  exit 1
-fi
-GITHUB_HOST=${LOCAL_REPO_URL#*://}
-GITHUB_HOST=${GITHUB_HOST%%/*}
-GITHUB_HOST=${GITHUB_HOST%%:*}
-if [ -z "$GITHUB_HOST" ] || [ "$GITHUB_HOST" = "$LOCAL_REPO_URL" ]; then
-  echo "Error: GitHub host could not be resolved from $LOCAL_REPO_URL" >&2
-  exit 1
-fi
-
-REPO_DATA=$(gh api --hostname "$GITHUB_HOST" "repos/$LOCAL_REPO") || {
-  echo "Error: GitHub metadata could not be read for $LOCAL_REPO" >&2
-  exit 1
-}
-IS_FORK=$(printf '%s' "$REPO_DATA" | jq -r '.fork')
-
-if [ "$IS_FORK" = "true" ]; then
-  PR_REPO=$(printf '%s' "$REPO_DATA" | jq -r '.parent.full_name')
-else
-  PR_REPO="$LOCAL_REPO"
-fi
-if [ -z "$PR_REPO" ] || [ "$PR_REPO" = "null" ]; then
-  echo "Error: pull-request repository could not be resolved" >&2
-  exit 1
-fi
-
-DEFAULT_BRANCH=$(gh api --hostname "$GITHUB_HOST" "repos/$PR_REPO" \
-  --jq '.default_branch') || {
-  echo "Error: default branch could not be resolved for $PR_REPO" >&2
-  exit 1
-}
-if [ -z "$DEFAULT_BRANCH" ] || [ "$DEFAULT_BRANCH" = "null" ]; then
-  echo "Error: default branch is empty for $PR_REPO" >&2
-  exit 1
-fi
+REPO_IDENTITY=$("$REPO_IDENTITY_HELPER" resolve --require-push) || exit 1
+GITHUB_HOST=$(printf '%s' "$REPO_IDENTITY" | jq -r '.github_host')
+LOCAL_REPO=$(printf '%s' "$REPO_IDENTITY" | jq -r '.local_repo')
+PR_REPO=$(printf '%s' "$REPO_IDENTITY" | jq -r '.base_repo')
+DEFAULT_BRANCH=$(printf '%s' "$REPO_IDENTITY" | jq -r '.default_branch')
+for IDENTITY_NAME in GITHUB_HOST LOCAL_REPO PR_REPO DEFAULT_BRANCH; do
+  case "${!IDENTITY_NAME}" in
+    "" | null)
+      echo "Error: repository identity field $IDENTITY_NAME is empty" >&2
+      exit 1
+      ;;
+  esac
+done
 ```
 
 ## 3. Match remotes by repository identity
 
 Remote names are local choices. Every fetch URL and the single effective push
 URL must match the discovered GitHub host and expected `owner/name`. Reject
-split push destinations rather than choosing one.
+split push destinations rather than choosing one. `PUSH_REMOTE` is the remote
+that matches the verified writable `LOCAL_REPO`, so a fork checkout pushes to
+its fork remote even when an upstream remote is also configured.
 
 ```bash
 remote_url_identity() {
@@ -236,6 +232,7 @@ fi
 | `BASE_REMOTE` | Remote matching `PR_REPO` |
 | `BASE_REF` | `$BASE_REMOTE/$DEFAULT_BRANCH` |
 | `PUSH_REMOTE` | Remote matching the contributor's writable repository |
+| `LOCAL_REPO` | Verified writable `owner/name`: the fork when one exists |
 | `PR_REPO` | `owner/name` repository receiving the pull request |
 | `PR_HEAD_PREFIX` | Fork-owner prefix for pull-request head lookup, or empty |
 | `ROLE` | `owner` or `fork`; permission detection can set `maintainer` |

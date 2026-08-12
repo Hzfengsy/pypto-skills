@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import unittest
 from pathlib import Path
@@ -66,7 +67,7 @@ GITHUB_CONTEXT_VARIABLES = (
 )
 
 REFERENCE_INPUTS = {
-    "setup.md": frozenset(),
+    "setup.md": frozenset({"REPO_IDENTITY_HELPER"}),
     "lookup-pr.md": frozenset(
         {
             "CURRENT_BRANCH",
@@ -259,6 +260,61 @@ class PortabilityTests(unittest.TestCase):
         for variable in GITHUB_CONTEXT_VARIABLES:
             with self.subTest(variable=variable):
                 self.assertIn(variable, definitions)
+
+    def test_repository_identity_never_uses_ambient_cli_selection(self) -> None:
+        helper = ROOT / "lib/github/scripts/repo-identity.sh"
+        self.assertTrue(helper.is_file(), f"missing required helper: {helper}")
+        self.assertTrue(
+            os.access(helper, os.X_OK), f"helper is not executable: {helper}"
+        )
+
+        setup = ROOT / "lib/github/setup.md"
+        text = setup.read_text(encoding="utf-8")
+        self.assertIn("scripts/repo-identity.sh", text)
+        self.assertIn(
+            '"$REPO_IDENTITY_HELPER" resolve --require-push',
+            bash_source(setup),
+        )
+
+        # `gh repo view` answers "what is gh's base repository here", which
+        # prefers a parent over the checkout's own fork and prompts when
+        # several remotes qualify. Identity comes from the remotes instead.
+        for path in deployable_files():
+            with self.subTest(path=path):
+                content = path.read_text(encoding="utf-8")
+                shell = content if path.suffix == ".sh" else bash_source(path)
+                self.assertNotIn("gh repo view", shell)
+
+    def test_push_target_prefers_a_writable_fork_and_fails_explicitly(self) -> None:
+        collapsed = " ".join(
+            (ROOT / "lib/github/setup.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn(
+            "a fork the authenticated account both owns and can push to wins",
+            collapsed,
+        )
+        self.assertIn(
+            "Write access is not ownership",
+            collapsed,
+        )
+        self.assertIn(
+            "the base repository wins only when the account can push to it",
+            collapsed,
+        )
+        self.assertIn(
+            "Never fall back to a repository the account cannot push to",
+            collapsed,
+        )
+
+    def test_issue_identity_delegates_to_the_shared_resolver(self) -> None:
+        issue_helper = (ROOT / "lib/github/scripts/issue-context.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("repo-identity.sh", issue_helper)
+        self.assertIn(
+            "scripts/repo-identity.sh",
+            (ROOT / "lib/github/issue-context.md").read_text(encoding="utf-8"),
+        )
 
     def test_references_consume_only_explicit_inputs_before_definition(
         self,

@@ -6,11 +6,15 @@ lookup or ambient GitHub CLI repository selection.
 
 ## Repository identity
 
-Run `scripts/issue-context.sh repository` from the checkout. The helper reads
-every Git remote fetch and push URL, normalizes the host and `owner/name`, and
-rejects unrelated hosts or repositories. It queries each candidate through
-host-pinned REST calls, maps a fork to its parent issue repository, and queries
-that target for its default branch. It never uses `gh repo view`.
+Run `scripts/issue-context.sh repository` from the checkout. It delegates to
+`scripts/repo-identity.sh`, the same identity resolver the pull-request
+workflows use, so issue and pull-request identity cannot drift. That resolver
+reads every Git remote fetch and push URL, normalizes the host and
+`owner/name`, and rejects unrelated hosts or repositories. It queries each
+candidate through host-pinned REST calls, maps a fork to its parent issue
+repository, and queries that target for its default branch. It never uses
+`gh repo view`, whose ambient base-repository selection answers a different
+question and prefers a parent over the checkout's own fork.
 
 The JSON output defines these exact values:
 
